@@ -124,7 +124,8 @@ function normalize(raw: Record<string, unknown>): ModelConfig {
   };
 }
 
-export function loadModels(): ModelConfig[] {
+/** 读取旧版 localStorage 数据：仅用于一次性迁移导入服务端数据库 */
+export function loadLegacyModels(): ModelConfig[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -137,41 +138,68 @@ export function loadModels(): ModelConfig[] {
   }
 }
 
-// ---- 把 localStorage 包装成 React 外部存储（useSyncExternalStore） ----
+/** 导入完成后清掉旧存储，避免重复提示 */
+export function clearLegacyModels(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(STORAGE_KEY);
+}
 
-const EMPTY: ModelConfig[] = [];
-let cache: ModelConfig[] | null = null;
-const listeners = new Set<() => void>();
+/** 新增/编辑时的入参（不含 id 与时间戳，由服务端生成） */
+export interface ModelConfigInput {
+  name: string;
+  protocol: ProtocolId;
+  modelId: string;
+  baseUrl: string;
+  apiKey: string;
+  reasoningPassback: boolean;
+  passbackMode: PassbackMode;
+  passbackField: string;
+  thinkingEnabled: boolean;
+  effortLevels: string[];
+}
 
-export function subscribeModels(listener: () => void): () => void {
-  listeners.add(listener);
-  // 跨标签页同步：其它页面写入时失效缓存并通知
-  const onStorage = (e: StorageEvent) => {
-    if (e.key === null || e.key === STORAGE_KEY) {
-      cache = null;
-      listener();
-    }
+/** 服务端入库前的统一校验与清洗，客户端与 API 路由共用 */
+export function sanitizeModelInput(
+  raw: unknown,
+): { ok: true; value: ModelConfigInput } | { ok: false; error: string } {
+  if (typeof raw !== "object" || raw === null) {
+    return { ok: false, error: "请求体格式错误" };
+  }
+  const r = raw as Record<string, unknown>;
+
+  const name = String(r.name ?? "").trim();
+  if (!name) return { ok: false, error: "请填写模型名称" };
+  const modelId = String(r.modelId ?? "").trim();
+  if (!modelId) return { ok: false, error: "请填写模型 ID" };
+  if (!PROTOCOLS.some((p) => p.id === r.protocol)) {
+    return { ok: false, error: "协议不合法" };
+  }
+  const passbackMode: PassbackMode = r.passbackMode === "custom" ? "custom" : "passthrough";
+  const passbackField = String(r.passbackField ?? "").trim();
+  if (passbackMode === "custom" && !passbackField) {
+    return { ok: false, error: "请填写自定义回传字段名" };
+  }
+
+  return {
+    ok: true,
+    value: {
+      name,
+      protocol: r.protocol as ProtocolId,
+      modelId,
+      baseUrl: String(r.baseUrl ?? "").trim(),
+      apiKey: String(r.apiKey ?? "").trim(),
+      reasoningPassback: Boolean(r.reasoningPassback),
+      passbackMode,
+      passbackField,
+      thinkingEnabled: Boolean(r.thinkingEnabled),
+      effortLevels: Array.isArray(r.effortLevels)
+        ? r.effortLevels.filter(
+            (l): l is string =>
+              typeof l === "string" && (REASONING_LEVELS as readonly string[]).includes(l),
+          )
+        : [],
+    },
   };
-  window.addEventListener("storage", onStorage);
-  return () => {
-    listeners.delete(listener);
-    window.removeEventListener("storage", onStorage);
-  };
-}
-
-export function getModelsSnapshot(): ModelConfig[] {
-  cache ??= loadModels();
-  return cache;
-}
-
-export function getModelsServerSnapshot(): ModelConfig[] {
-  return EMPTY;
-}
-
-export function saveModels(models: ModelConfig[]): void {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(models));
-  cache = models;
-  for (const fn of listeners) fn();
 }
 
 /** API Key 打码展示，只保留前 4 位与后 4 位 */

@@ -8,13 +8,20 @@ import {
   type ProtocolId,
   PROTOCOLS,
   REASONING_LEVELS,
-  getModelsServerSnapshot,
-  getModelsSnapshot,
+  clearLegacyModels,
+  loadLegacyModels,
   maskKey,
   protocolMeta,
-  saveModels,
-  subscribeModels,
 } from "@/lib/models";
+import {
+  createModel,
+  deleteModel,
+  getModelsServerSnapshot,
+  getModelsSnapshot,
+  isModelsLoaded,
+  subscribeModels,
+  updateModel,
+} from "@/lib/models-store";
 
 interface FormState {
   name: string;
@@ -63,6 +70,10 @@ export default function ModelsPage() {
   const [showKey, setShowKey] = useState(false);
   const [error, setError] = useState("");
   const [tests, setTests] = useState<Record<string, TestState>>({});
+  const [saving, setSaving] = useState(false);
+  // 旧版数据存在浏览器 localStorage 里；服务端列表为空时提供一次性导入
+  const [legacyModels, setLegacyModels] = useState<ModelConfig[]>(() => loadLegacyModels());
+  const [importing, setImporting] = useState(false);
 
   const openCreate = () => {
     setForm(emptyForm());
@@ -107,7 +118,7 @@ export default function ModelsPage() {
     });
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const name = form.name.trim();
     const modelId = form.modelId.trim();
     if (!name) return setError("请填写模型名称");
@@ -115,11 +126,9 @@ export default function ModelsPage() {
     if (form.reasoningPassback && form.passbackMode === "custom" && !form.passbackField.trim())
       return setError("请填写自定义回传字段名");
 
-    const now = Date.now();
-    const id = editingId ?? crypto.randomUUID();
-    const existing = models.find((m) => m.id === editingId);
-    const saved: ModelConfig = {
-      id,
+    setSaving(true);
+    setError("");
+    const payload = {
       name,
       protocol: form.protocol,
       modelId,
@@ -130,17 +139,42 @@ export default function ModelsPage() {
       reasoningPassback: form.reasoningPassback,
       passbackMode: form.passbackMode,
       passbackField: form.passbackField.trim(),
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
     };
-
-    saveModels([...models.filter((m) => m.id !== editingId), saved]);
+    const result = editingId
+      ? await updateModel(editingId, payload)
+      : await createModel(payload);
+    setSaving(false);
+    if (!result.ok) return setError(result.error ?? "保存失败");
     setModalOpen(false);
   };
 
-  const handleDelete = (model: ModelConfig) => {
+  const handleDelete = async (model: ModelConfig) => {
     if (!window.confirm(`确定删除「${model.name}」吗？`)) return;
-    saveModels(models.filter((m) => m.id !== model.id));
+    await deleteModel(model.id);
+  };
+
+  const handleImport = async () => {
+    setImporting(true);
+    try {
+      for (const m of legacyModels) {
+        await createModel({
+          name: m.name,
+          protocol: m.protocol,
+          modelId: m.modelId,
+          baseUrl: m.baseUrl,
+          apiKey: m.apiKey,
+          thinkingEnabled: m.thinkingEnabled,
+          effortLevels: m.effortLevels,
+          reasoningPassback: m.reasoningPassback,
+          passbackMode: m.passbackMode,
+          passbackField: m.passbackField,
+        });
+      }
+      clearLegacyModels();
+      setLegacyModels([]);
+    } finally {
+      setImporting(false);
+    }
   };
 
   const runTest = async (model: ModelConfig) => {
@@ -183,7 +217,7 @@ export default function ModelsPage() {
           <div>
             <h1 className="text-3xl font-bold">模型配置</h1>
             <p className="mt-2 text-sm text-neutral-400">
-              管理参赛选手：接入各家大模型，配置接口地址与密钥。数据仅保存在本地浏览器。
+              管理参赛选手：接入各家大模型，配置接口地址与密钥。数据保存在服务端本地 SQLite 数据库。
             </p>
           </div>
           <button
@@ -194,7 +228,30 @@ export default function ModelsPage() {
           </button>
         </div>
 
-        {models.length === 0 ? (
+        {!isModelsLoaded() ? (
+          <div className="rounded-2xl border border-white/10 py-20 text-center text-sm text-neutral-500">
+            加载中…
+          </div>
+        ) : models.length === 0 && legacyModels.length > 0 ? (
+          <div className="flex flex-col items-center rounded-2xl border border-dashed border-amber-400/30 bg-amber-400/[0.03] py-16 text-center">
+            <div className="text-4xl" aria-hidden>
+              📦
+            </div>
+            <p className="mt-4 font-medium text-neutral-200">
+              检测到浏览器里保存的 {legacyModels.length} 个模型配置
+            </p>
+            <p className="mt-1 text-sm text-neutral-500">
+              存储已切换到服务端数据库，可以把旧配置一次性导入
+            </p>
+            <button
+              onClick={handleImport}
+              disabled={importing}
+              className="mt-6 rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-neutral-950 transition-colors hover:bg-amber-400 disabled:cursor-wait disabled:opacity-60"
+            >
+              {importing ? "导入中…" : "导入到数据库"}
+            </button>
+          </div>
+        ) : models.length === 0 ? (
           <div className="flex flex-col items-center rounded-2xl border border-dashed border-white/15 py-20 text-center">
             <div className="text-5xl" aria-hidden>
               🏟️
@@ -568,9 +625,10 @@ export default function ModelsPage() {
               </button>
               <button
                 onClick={handleSave}
-                className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-neutral-950 shadow-lg shadow-amber-500/20 transition-colors hover:bg-amber-400"
+                disabled={saving}
+                className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-neutral-950 shadow-lg shadow-amber-500/20 transition-colors hover:bg-amber-400 disabled:cursor-wait disabled:opacity-60"
               >
-                保存
+                {saving ? "保存中…" : "保存"}
               </button>
             </div>
           </div>

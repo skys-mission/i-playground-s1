@@ -98,7 +98,7 @@ export default function Home() {
       </main>
 
       <footer className="border-t border-white/10 py-6 text-center text-xs text-neutral-600">
-        AI 竞技游乐场 · 配置数据仅保存在本地浏览器
+        AI 竞技游乐场 · 数据保存在本地 SQLite 数据库，密钥不会离开你的机器
       </footer>
     </div>
   );
