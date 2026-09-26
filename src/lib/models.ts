@@ -19,7 +19,7 @@ export const PROTOCOLS: ProtocolMeta[] = [
     label: "OpenAI · Chat Completions",
     defaultBaseUrl: "https://api.openai.com/v1",
     suggestedModel: "gpt-4o",
-    badgeClass: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30",
+    badgeClass: "bg-emerald-500/15 text-emerald-800 ring-emerald-600/40",
     reasoningDefault: false,
     thinkingHint: "调用时是否思考；等级即 reasoning_effort 取值，none=不思考。",
   },
@@ -28,7 +28,7 @@ export const PROTOCOLS: ProtocolMeta[] = [
     label: "OpenAI · Responses",
     defaultBaseUrl: "https://api.openai.com/v1",
     suggestedModel: "gpt-5",
-    badgeClass: "bg-teal-500/15 text-teal-300 ring-teal-500/30",
+    badgeClass: "bg-teal-500/15 text-teal-800 ring-teal-600/40",
     reasoningDefault: true,
     thinkingHint: "调用时是否思考；等级即 reasoning.effort 取值，none=不思考。",
   },
@@ -37,7 +37,7 @@ export const PROTOCOLS: ProtocolMeta[] = [
     label: "Anthropic · Messages",
     defaultBaseUrl: "https://api.anthropic.com",
     suggestedModel: "claude-sonnet-4-5",
-    badgeClass: "bg-orange-500/15 text-orange-300 ring-orange-500/30",
+    badgeClass: "bg-orange-500/15 text-orange-800 ring-orange-600/40",
     reasoningDefault: true,
     thinkingHint:
       "等级经 output_config.effort 传递（minimal 按 low、none=关思考）；新旧模型的思考参数形态自动兼容。",
@@ -84,7 +84,8 @@ export interface ModelConfig {
   protocol: ProtocolId;
   modelId: string;
   baseUrl: string;
-  apiKey: string;
+  /** API Key 掩码（仅展示用；完整密钥不下发到浏览器，编辑时留空 = 保持原值） */
+  apiKeyMask: string;
   /** 模型头像（data URL，空串 = 无头像） */
   avatar: string;
   /** 思维链回传开关：多轮对话时是否把上一轮思维链随历史消息发回服务端。
@@ -103,67 +104,6 @@ export interface ModelConfig {
   contextLimit: number;
   createdAt: number;
   updatedAt: number;
-}
-
-const STORAGE_KEY = "ai-arena:models";
-
-/** 兼容旧版按供应商存储的数据：provider → protocol 迁移 */
-function normalize(raw: Record<string, unknown>): ModelConfig {
-  const protocol =
-    typeof raw.protocol === "string" &&
-    PROTOCOLS.some((p) => p.id === raw.protocol)
-      ? (raw.protocol as ProtocolId)
-      : // 旧数据只有 provider：Anthropic 归 Messages，其余按 OpenAI 系处理
-        raw.provider === "anthropic"
-        ? "anthropic-messages"
-        : "openai-chat";
-  return {
-    id: String(raw.id ?? crypto.randomUUID()),
-    name: String(raw.name ?? ""),
-    protocol,
-    modelId: String(raw.modelId ?? ""),
-    baseUrl: String(raw.baseUrl ?? ""),
-    apiKey: String(raw.apiKey ?? ""),
-    avatar: typeof raw.avatar === "string" && raw.avatar.startsWith("data:image/") ? raw.avatar : "",
-    // 旧数据可能是接收语义的 reasoningEnabled：沿用其值，否则按协议默认补齐
-    reasoningPassback:
-      typeof raw.reasoningPassback === "boolean"
-        ? raw.reasoningPassback
-        : typeof raw.reasoningEnabled === "boolean"
-          ? raw.reasoningEnabled
-          : protocolMeta(protocol).reasoningDefault,
-    passbackMode: raw.passbackMode === "custom" ? "custom" : "passthrough",
-    passbackField: typeof raw.passbackField === "string" ? raw.passbackField.trim() : "",
-    thinkingEnabled: Boolean(raw.thinkingEnabled),
-    effortLevels: Array.isArray(raw.effortLevels)
-      ? raw.effortLevels.filter((l): l is string =>
-          (REASONING_LEVELS as readonly string[]).includes(l),
-        )
-      : [],
-    contextLimit: parseContextLimit(raw.contextLimit),
-    createdAt: Number(raw.createdAt ?? Date.now()),
-    updatedAt: Number(raw.updatedAt ?? Date.now()),
-  };
-}
-
-/** 读取旧版 localStorage 数据：仅用于一次性迁移导入服务端数据库 */
-export function loadLegacyModels(): ModelConfig[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalize);
-  } catch {
-    return [];
-  }
-}
-
-/** 导入完成后清掉旧存储，避免重复提示 */
-export function clearLegacyModels(): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.removeItem(STORAGE_KEY);
 }
 
 /** 新增/编辑时的入参（不含 id 与时间戳，由服务端生成） */

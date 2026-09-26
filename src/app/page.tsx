@@ -118,10 +118,6 @@ export default function Home() {
           更多玩法即将登场：{MORE_GAMES.join(" · ")}
         </p>
       </main>
-
-      <footer className="border-t-[3px] border-[#141414] py-5 text-center text-xs font-bold text-neutral-600">
-        AI 竞技游乐场 · 数据保存在本地 SQLite 数据库，密钥不会离开你的机器
-      </footer>
     </div>
   );
 }
