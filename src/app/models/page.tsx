@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useSyncExternalStore } from "react";
+import { Avatar } from "@/components/Avatar";
 import { SiteNav } from "@/components/SiteNav";
+import { AVATAR_MAX_LENGTH, fileToAvatarDataUrl } from "@/lib/avatar";
 import {
   type ModelConfig,
   type PassbackMode,
@@ -29,11 +31,14 @@ interface FormState {
   modelId: string;
   baseUrl: string;
   apiKey: string;
+  avatar: string;
   thinkingEnabled: boolean;
   effortLevels: string[];
   reasoningPassback: boolean;
   passbackMode: PassbackMode;
   passbackField: string;
+  /** 输入上下文上限（tokens），表单里用字符串便于输入；空/0 = 不限制 */
+  contextLimit: string;
 }
 
 function emptyForm(): FormState {
@@ -43,11 +48,13 @@ function emptyForm(): FormState {
     modelId: "",
     baseUrl: PROTOCOLS[0].defaultBaseUrl,
     apiKey: "",
+    avatar: "",
     thinkingEnabled: false,
     effortLevels: [],
     reasoningPassback: PROTOCOLS[0].reasoningDefault,
     passbackMode: "passthrough",
     passbackField: "",
+    contextLimit: "230000",
   };
 }
 
@@ -90,11 +97,13 @@ export default function ModelsPage() {
       modelId: model.modelId,
       baseUrl: model.baseUrl,
       apiKey: model.apiKey,
+      avatar: model.avatar,
       thinkingEnabled: model.thinkingEnabled,
       effortLevels: model.effortLevels,
       reasoningPassback: model.reasoningPassback,
       passbackMode: model.passbackMode,
       passbackField: model.passbackField,
+      contextLimit: model.contextLimit > 0 ? String(model.contextLimit) : "",
     });
     setEditingId(model.id);
     setError("");
@@ -118,6 +127,21 @@ export default function ModelsPage() {
     });
   };
 
+  const handleAvatarChange = async (file: File | undefined) => {
+    if (!file) return;
+    setError("");
+    try {
+      const dataUrl = await fileToAvatarDataUrl(file);
+      if (dataUrl.length > AVATAR_MAX_LENGTH) {
+        setError("头像图片过大，请换一张试试");
+        return;
+      }
+      setForm((prev) => ({ ...prev, avatar: dataUrl }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "头像处理失败");
+    }
+  };
+
   const handleSave = async () => {
     const name = form.name.trim();
     const modelId = form.modelId.trim();
@@ -134,11 +158,13 @@ export default function ModelsPage() {
       modelId,
       baseUrl: form.baseUrl.trim(),
       apiKey: form.apiKey.trim(),
+      avatar: form.avatar,
       thinkingEnabled: form.thinkingEnabled,
       effortLevels: form.effortLevels,
       reasoningPassback: form.reasoningPassback,
       passbackMode: form.passbackMode,
       passbackField: form.passbackField.trim(),
+      contextLimit: form.contextLimit.trim() === "" ? 0 : Math.max(0, Math.floor(Number(form.contextLimit) || 0)),
     };
     const result = editingId
       ? await updateModel(editingId, payload)
@@ -163,6 +189,7 @@ export default function ModelsPage() {
           modelId: m.modelId,
           baseUrl: m.baseUrl,
           apiKey: m.apiKey,
+          avatar: m.avatar,
           thinkingEnabled: m.thinkingEnabled,
           effortLevels: m.effortLevels,
           reasoningPassback: m.reasoningPassback,
@@ -276,100 +303,117 @@ export default function ModelsPage() {
                   key={model.id}
                   className="p-4 transition-colors hover:bg-white/[0.02]"
                 >
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                    <h2 className="text-sm font-semibold">{model.name}</h2>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-xs ring-1 ${meta.badgeClass}`}
-                    >
-                      {meta.label}
-                    </span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-xs ring-1 ${
-                        model.thinkingEnabled
-                          ? "bg-amber-400/10 text-amber-300 ring-amber-400/25"
-                          : "bg-white/5 text-neutral-500 ring-white/10"
-                      }`}
-                      title={
-                        model.thinkingEnabled
-                          ? protocolMeta(model.protocol).thinkingHint +
-                            (model.effortLevels.length
-                              ? `（已选：${model.effortLevels.join(" / ")}）`
-                              : "")
-                          : "调用时不开启思考"
-                      }
-                    >
-                      ⚡ 推理
-                      {model.thinkingEnabled
-                        ? model.effortLevels.length
-                          ? ` · ${model.effortLevels.length} 档`
-                          : ""
-                        : "关"}
-                    </span>
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-xs ring-1 ${
-                        model.reasoningPassback
-                          ? "bg-amber-400/10 text-amber-300 ring-amber-400/25"
-                          : "bg-white/5 text-neutral-500 ring-white/10"
-                      }`}
-                      title={
-                        model.reasoningPassback
-                          ? "多轮对话时把上一轮思维链发回服务端"
-                          : "多轮对话时不把思维链发回服务端"
-                      }
-                    >
-                      🧠 回传
-                      {model.reasoningPassback
-                        ? model.passbackMode === "custom"
-                          ? ` · ${model.passbackField || "自定义字段"}`
-                          : " · 原样"
-                        : "关"}
-                    </span>
-                    <code className="rounded bg-neutral-800/80 px-1.5 py-0.5 font-mono text-xs text-neutral-300">
-                      {model.modelId}
-                    </code>
+                  <div className="flex items-start gap-3">
+                    <Avatar
+                      name={model.name}
+                      src={model.avatar || undefined}
+                      className="size-10 shrink-0 text-base"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                        <h2 className="text-sm font-semibold">{model.name}</h2>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs ring-1 ${meta.badgeClass}`}
+                        >
+                          {meta.label}
+                        </span>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs ring-1 ${
+                            model.thinkingEnabled
+                              ? "bg-amber-400/10 text-amber-300 ring-amber-400/25"
+                              : "bg-white/5 text-neutral-500 ring-white/10"
+                          }`}
+                          title={
+                            model.thinkingEnabled
+                              ? protocolMeta(model.protocol).thinkingHint +
+                                (model.effortLevels.length
+                                  ? `（已选：${model.effortLevels.join(" / ")}）`
+                                  : "")
+                              : "调用时不开启思考"
+                          }
+                        >
+                          ⚡ 推理
+                          {model.thinkingEnabled
+                            ? model.effortLevels.length
+                              ? ` · ${model.effortLevels.length} 档`
+                              : ""
+                            : "关"}
+                        </span>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs ring-1 ${
+                            model.reasoningPassback
+                              ? "bg-amber-400/10 text-amber-300 ring-amber-400/25"
+                              : "bg-white/5 text-neutral-500 ring-white/10"
+                          }`}
+                          title={
+                            model.reasoningPassback
+                              ? "多轮对话时把上一轮思维链发回服务端"
+                              : "多轮对话时不把思维链发回服务端"
+                          }
+                        >
+                          🧠 回传
+                          {model.reasoningPassback
+                            ? model.passbackMode === "custom"
+                              ? ` · ${model.passbackField || "自定义字段"}`
+                              : " · 原样"
+                            : "关"}
+                        </span>
+                        {model.contextLimit > 0 && (
+                          <span
+                            className="rounded-full bg-white/5 px-2 py-0.5 text-xs text-neutral-400 ring-1 ring-white/10"
+                            title="输入超过此上限（tokens 估算）时自动压缩"
+                          >
+                            📏 ≤{model.contextLimit >= 1000 ? `${Math.round(model.contextLimit / 1000)}k` : model.contextLimit}
+                          </span>
+                        )}
+                        <code className="rounded bg-neutral-800/80 px-1.5 py-0.5 font-mono text-xs text-neutral-300">
+                          {model.modelId}
+                        </code>
 
-                    <div className="ml-auto flex gap-2">
-                      <button
-                        onClick={() => runTest(model)}
-                        disabled={tests[model.id]?.loading}
-                        className="rounded-lg bg-white/5 px-2.5 py-1 text-xs font-medium transition-colors hover:bg-white/10 disabled:cursor-wait disabled:opacity-60"
-                      >
-                        {tests[model.id]?.loading ? "测试中…" : "测试"}
-                      </button>
-                      <button
-                        onClick={() => openEdit(model)}
-                        className="rounded-lg bg-white/5 px-2.5 py-1 text-xs font-medium transition-colors hover:bg-white/10"
-                      >
-                        编辑
-                      </button>
-                      <button
-                        onClick={() => handleDelete(model)}
-                        className="rounded-lg bg-red-500/10 px-2.5 py-1 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/20"
-                      >
-                        删除
-                      </button>
+                        <div className="ml-auto flex gap-2">
+                          <button
+                            onClick={() => runTest(model)}
+                            disabled={tests[model.id]?.loading}
+                            className="rounded-lg bg-white/5 px-2.5 py-1 text-xs font-medium transition-colors hover:bg-white/10 disabled:cursor-wait disabled:opacity-60"
+                          >
+                            {tests[model.id]?.loading ? "测试中…" : "测试"}
+                          </button>
+                          <button
+                            onClick={() => openEdit(model)}
+                            className="rounded-lg bg-white/5 px-2.5 py-1 text-xs font-medium transition-colors hover:bg-white/10"
+                          >
+                            编辑
+                          </button>
+                          <button
+                            onClick={() => handleDelete(model)}
+                            className="rounded-lg bg-red-500/10 px-2.5 py-1 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/20"
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </div>
+
+                      <p className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs text-neutral-500">
+                        <span className="max-w-full truncate" title={model.baseUrl}>
+                          {model.baseUrl || "—"}
+                        </span>
+                        <span>{maskKey(model.apiKey)}</span>
+                      </p>
+
+                      {tests[model.id] && !tests[model.id].loading && (
+                        <p
+                          className={`mt-2 truncate text-xs ${
+                            tests[model.id].ok ? "text-emerald-400" : "text-red-400"
+                          }`}
+                          title={tests[model.id].message}
+                        >
+                          {tests[model.id].ok
+                            ? `✓ 连通 · ${tests[model.id].latencyMs}ms`
+                            : `✗ ${tests[model.id].message}`}
+                        </p>
+                      )}
                     </div>
                   </div>
-
-                  <p className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs text-neutral-500">
-                    <span className="max-w-full truncate" title={model.baseUrl}>
-                      {model.baseUrl || "—"}
-                    </span>
-                    <span>{maskKey(model.apiKey)}</span>
-                  </p>
-
-                  {tests[model.id] && !tests[model.id].loading && (
-                    <p
-                      className={`mt-2 truncate text-xs ${
-                        tests[model.id].ok ? "text-emerald-400" : "text-red-400"
-                      }`}
-                      title={tests[model.id].message}
-                    >
-                      {tests[model.id].ok
-                        ? `✓ 连通 · ${tests[model.id].latencyMs}ms`
-                        : `✗ ${tests[model.id].message}`}
-                    </p>
-                  )}
                 </li>
               );
             })}
@@ -377,31 +421,74 @@ export default function ModelsPage() {
         )}
       </main>
 
-      {/* 新增 / 编辑弹窗 */}
+      {/* 新增 / 编辑弹窗：限高 + 内容区滚动，任何屏都出不了首屏 */}
       {modalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
           onClick={() => setModalOpen(false)}
         >
           <div
-            className="w-full max-w-lg rounded-2xl border border-white/10 bg-neutral-900 p-6 shadow-2xl"
+            className="flex max-h-[calc(100dvh-6rem)] w-full max-w-2xl flex-col rounded-2xl border border-white/10 bg-neutral-900 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 className="text-xl font-bold">
-              {editingId ? "编辑模型" : "新增模型"}
-            </h2>
+            <div className="shrink-0 px-6 pt-5">
+              <h2 className="text-xl font-bold">
+                {editingId ? "编辑模型" : "新增模型"}
+              </h2>
+            </div>
 
-            <div className="mt-5 space-y-4">
-              <div>
-                <label className="mb-1.5 block text-sm text-neutral-300">
-                  名称 <span className="text-red-400">*</span>
-                </label>
-                <input
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  placeholder="例如：GLM 主力 / GPT 参谋"
-                  className="w-full rounded-lg border border-white/10 bg-neutral-800/60 px-3 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-amber-400/60"
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+              <div className="space-y-3">
+              {/* 头像 + 名称一行；头像上传后裁剪为 128px data URL 存库 */}
+              <div className="flex items-end gap-4">
+                <Avatar
+                  name={form.name}
+                  src={form.avatar || undefined}
+                  className="size-14 shrink-0 text-xl"
                 />
+                <div className="flex shrink-0 flex-col gap-1.5 pb-1.5">
+                  <div className="flex gap-2">
+                    <label
+                      className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                        form.avatar
+                          ? "bg-white/5 hover:bg-white/10"
+                          : "bg-amber-500 font-semibold text-neutral-950 hover:bg-amber-400"
+                      }`}
+                    >
+                      {form.avatar ? "更换头像" : "上传头像"}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          void handleAvatarChange(e.target.files?.[0]);
+                          e.target.value = "";
+                        }}
+                      />
+                    </label>
+                    {form.avatar && (
+                      <button
+                        type="button"
+                        onClick={() => setForm((prev) => ({ ...prev, avatar: "" }))}
+                        className="rounded-lg bg-white/5 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-colors hover:bg-white/10"
+                      >
+                        移除
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-neutral-500">不上传则用名字首字</p>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <label className="mb-1.5 block text-sm text-neutral-300">
+                    名称 <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    placeholder="例如：GLM 主力 / GPT 参谋"
+                    className="w-full rounded-lg border border-white/10 bg-neutral-800/60 px-3 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-amber-400/60"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -432,42 +519,43 @@ export default function ModelsPage() {
                 </div>
               </div>
 
-              <div>
-                <label className="mb-1.5 block text-sm text-neutral-300">
-                  API Base URL
-                </label>
-                <input
-                  value={form.baseUrl}
-                  onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
-                  placeholder="https://api.example.com/v1"
-                  className="w-full rounded-lg border border-white/10 bg-neutral-800/60 px-3 py-2 font-mono text-sm outline-none placeholder:text-neutral-600 focus:border-amber-400/60"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-sm text-neutral-300">API Key</label>
-                <div className="flex gap-2">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1.5 block text-sm text-neutral-300">
+                    API Base URL
+                  </label>
                   <input
-                    type={showKey ? "text" : "password"}
-                    value={form.apiKey}
-                    onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
-                    placeholder="sk-..."
-                    autoComplete="off"
+                    value={form.baseUrl}
+                    onChange={(e) => setForm({ ...form, baseUrl: e.target.value })}
+                    placeholder="https://api.example.com/v1"
                     className="w-full rounded-lg border border-white/10 bg-neutral-800/60 px-3 py-2 font-mono text-sm outline-none placeholder:text-neutral-600 focus:border-amber-400/60"
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowKey((v) => !v)}
-                    className="shrink-0 rounded-lg bg-white/5 px-3 text-sm transition-colors hover:bg-white/10"
-                    aria-label={showKey ? "隐藏密钥" : "显示密钥"}
-                  >
-                    {showKey ? "🙈" : "👁"}
-                  </button>
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-sm text-neutral-300">API Key</label>
+                  <div className="flex gap-2">
+                    <input
+                      type={showKey ? "text" : "password"}
+                      value={form.apiKey}
+                      onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
+                      placeholder="sk-..."
+                      autoComplete="off"
+                      className="min-w-0 flex-1 rounded-lg border border-white/10 bg-neutral-800/60 px-3 py-2 font-mono text-sm outline-none placeholder:text-neutral-600 focus:border-amber-400/60"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowKey((v) => !v)}
+                      className="shrink-0 rounded-lg bg-white/5 px-3 text-sm transition-colors hover:bg-white/10"
+                      aria-label={showKey ? "隐藏密钥" : "显示密钥"}
+                    >
+                      {showKey ? "🙈" : "👁"}
+                    </button>
+                  </div>
                 </div>
               </div>
 
               {/* 推理控制：开关 = 要不要思考；等级 = 该模型支持的推理努力档位（平铺勾选） */}
-              <div className="rounded-xl border border-white/10 bg-neutral-800/40 p-4">
+              <div className="rounded-xl border border-white/10 bg-neutral-800/40 p-3">
                 <div className="flex items-center justify-between gap-4">
                   <span className="flex items-center gap-2 text-sm font-medium text-neutral-200">
                     <span aria-hidden>⚡</span> 推理控制
@@ -492,13 +580,13 @@ export default function ModelsPage() {
                     />
                   </button>
                 </div>
-                <p className="mt-2 text-xs leading-relaxed text-neutral-500">
+                <p className="mt-1.5 text-[11px] leading-relaxed text-neutral-500">
                   {protocolMeta(form.protocol).thinkingHint}
                 </p>
 
-                <div className="mt-4 border-t border-white/5 pt-4">
+                <div className="mt-2.5 border-t border-white/5 pt-2.5">
                   <p className="text-xs text-neutral-400">支持的推理努力等级：</p>
-                  <div className="mt-2.5 flex flex-wrap gap-2">
+                  <div className="mt-2 flex flex-wrap gap-1.5">
                     {REASONING_LEVELS.map((level) => {
                       const active = form.effortLevels.includes(level);
                       return (
@@ -528,12 +616,33 @@ export default function ModelsPage() {
                 </div>
               </div>
 
+              {/* 上下文上限 + 回传：并排两列，缩短弹窗 */}
+              <div className="grid grid-cols-2 items-start gap-3">
+              {/* 输入上下文上限：超限时自动压缩输入（省略较早历史，保留最新局面） */}
+              <div className="rounded-xl border border-white/10 bg-neutral-800/40 p-3">
+                <span className="flex items-center gap-2 text-sm font-medium text-neutral-200">
+                  <span aria-hidden>📏</span> 输入上下文上限
+                  <span className="text-[11px] font-normal text-neutral-500">超限自动压缩</span>
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  value={form.contextLimit}
+                  onChange={(e) => setForm((prev) => ({ ...prev, contextLimit: e.target.value }))}
+                  placeholder="0 = 不限制"
+                  className="mt-2 w-full rounded-lg border border-white/10 bg-neutral-800/60 px-3 py-2 font-mono text-sm outline-none placeholder:text-neutral-600 focus:border-amber-400/60"
+                />
+                <p className="mt-1.5 text-[11px] leading-relaxed text-neutral-500">
+                  tokens 估算，超限时自动省略较早历史
+                </p>
+              </div>
+
               {/* 思维链回传开关：控制多轮对话时是否把思维链发回服务端（接收展示不受影响） */}
-              <div className="rounded-xl border border-white/10 bg-neutral-800/40 p-4">
+              <div className="rounded-xl border border-white/10 bg-neutral-800/40 p-3">
                 <div className="flex items-center justify-between gap-4">
                   <span className="flex items-center gap-2 text-sm font-medium text-neutral-200">
                     <span aria-hidden>🧠</span> 思维链回传
-                    <span className="text-xs font-normal text-neutral-500">多轮时发回服务端</span>
+                    <span className="text-[11px] font-normal text-neutral-500">多轮时发回服务端</span>
                   </span>
                   <button
                     type="button"
@@ -557,79 +666,71 @@ export default function ModelsPage() {
                     />
                   </button>
                 </div>
-                <p className="mt-2 text-xs leading-relaxed text-neutral-500">
-                  接收思维链始终开启；此开关只控制多轮对话时是否把上一轮思维链发回服务端。
+                <p className="mt-1.5 text-[11px] leading-relaxed text-neutral-500">
+                  只控制多轮对话时是否把上一轮思维链发回服务端
                 </p>
 
                 {form.reasoningPassback && (
-                  <div className="mt-4 space-y-3 border-t border-white/5 pt-4">
-                    <label className="flex cursor-pointer items-start gap-2.5">
+                  <div className="mt-2 space-y-1.5 border-t border-white/5 pt-2">
+                    <label className="flex cursor-pointer items-center gap-2">
                       <input
                         type="radio"
                         name="passback-mode"
                         checked={form.passbackMode === "passthrough"}
                         onChange={() => setForm({ ...form, passbackMode: "passthrough" })}
-                        className="mt-0.5 size-4 accent-amber-500"
+                        className="size-4 accent-amber-500"
                       />
-                      <span>
-                        <span className="text-sm text-neutral-200">原样回传（默认）</span>
-                        <span className="mt-0.5 block text-xs leading-relaxed text-neutral-500">
-                          将上一轮返回的思维链字段原样放回请求
-                        </span>
-                      </span>
+                      <span className="text-sm text-neutral-200">原样回传（默认）</span>
                     </label>
-                    <label className="flex cursor-pointer items-start gap-2.5">
+                    <label className="flex cursor-pointer items-center gap-2">
                       <input
                         type="radio"
                         name="passback-mode"
                         checked={form.passbackMode === "custom"}
                         onChange={() => setForm({ ...form, passbackMode: "custom" })}
-                        className="mt-0.5 size-4 accent-amber-500"
+                        className="size-4 accent-amber-500"
                       />
-                      <span>
-                        <span className="text-sm text-neutral-200">自定义字段映射</span>
-                        <span className="mt-0.5 block text-xs leading-relaxed text-neutral-500">
-                          把思维链内容放入指定字段名发回
-                        </span>
-                      </span>
+                      <span className="text-sm text-neutral-200">自定义字段映射</span>
                     </label>
                     {form.passbackMode === "custom" && (
-                      <div className="pl-7">
-                        <input
-                          value={form.passbackField}
-                          onChange={(e) =>
-                            setForm({ ...form, passbackField: e.target.value })
-                          }
-                          placeholder="字段名，例如：reasoning_content"
-                          className="w-full rounded-lg border border-white/10 bg-neutral-800/60 px-3 py-2 font-mono text-sm outline-none placeholder:text-neutral-600 focus:border-amber-400/60"
-                        />
-                      </div>
+                      <input
+                        value={form.passbackField}
+                        onChange={(e) =>
+                          setForm({ ...form, passbackField: e.target.value })
+                        }
+                        placeholder="字段名，例如：reasoning_content"
+                        className="w-full rounded-lg border border-white/10 bg-neutral-800/60 px-3 py-2 font-mono text-sm outline-none placeholder:text-neutral-600 focus:border-amber-400/60"
+                      />
                     )}
                   </div>
                 )}
               </div>
+              </div>
             </div>
 
             {error && (
-              <p className="mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-300">
+              <p className="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-300">
                 {error}
               </p>
             )}
+            </div>
 
-            <div className="mt-6 flex justify-end gap-3">
-              <button
-                onClick={() => setModalOpen(false)}
-                className="rounded-lg px-4 py-2 text-sm text-neutral-400 transition-colors hover:bg-white/5 hover:text-neutral-200"
-              >
-                取消
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-neutral-950 shadow-lg shadow-amber-500/20 transition-colors hover:bg-amber-400 disabled:cursor-wait disabled:opacity-60"
-              >
-                {saving ? "保存中…" : "保存"}
-              </button>
+            <div className="shrink-0 border-t border-white/5 px-6 py-4">
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setModalOpen(false)}
+                  className="rounded-lg px-4 py-2 text-sm text-neutral-400 transition-colors hover:bg-white/5 hover:text-neutral-200"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-semibold text-neutral-950 shadow-lg shadow-amber-500/20 transition-colors hover:bg-amber-400 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {saving ? "保存中…" : "保存"}
+                </button>
+              </div>
             </div>
           </div>
         </div>

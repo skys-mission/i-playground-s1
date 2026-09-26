@@ -59,6 +59,18 @@ export const REASONING_LEVELS = [
 
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 
+/** 上下文上限入参清洗：非正数/非法值一律归 0（= 不限制），封顶千万 */
+function parseContextLimit(v: unknown): number {
+  const n =
+    typeof v === "number"
+      ? v
+      : typeof v === "string" && v.trim() !== ""
+        ? Number(v)
+        : 0;
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(Math.floor(n), 10_000_000);
+}
+
 /** 思维链回传策略：passthrough = 原样回传（默认），custom = 自定义字段映射 */
 export type PassbackMode = "passthrough" | "custom";
 
@@ -69,6 +81,8 @@ export interface ModelConfig {
   modelId: string;
   baseUrl: string;
   apiKey: string;
+  /** 模型头像（data URL，空串 = 无头像） */
+  avatar: string;
   /** 思维链回传开关：多轮对话时是否把上一轮思维链随历史消息发回服务端。
    *  接收侧（流式解析 reasoning_content / reasoning 并展示）无条件支持，不受此开关控制。 */
   reasoningPassback: boolean;
@@ -81,6 +95,8 @@ export interface ModelConfig {
   thinkingEnabled: boolean;
   /** 该模型支持的推理努力等级（用户勾选；空 = 仅开/关思考、无等级概念，如 GLM） */
   effortLevels: string[];
+  /** 输入上下文上限（tokens 估算值）；0 = 不限制，超限时由调用方自动压缩输入 */
+  contextLimit: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -104,6 +120,7 @@ function normalize(raw: Record<string, unknown>): ModelConfig {
     modelId: String(raw.modelId ?? ""),
     baseUrl: String(raw.baseUrl ?? ""),
     apiKey: String(raw.apiKey ?? ""),
+    avatar: typeof raw.avatar === "string" && raw.avatar.startsWith("data:image/") ? raw.avatar : "",
     // 旧数据可能是接收语义的 reasoningEnabled：沿用其值，否则按协议默认补齐
     reasoningPassback:
       typeof raw.reasoningPassback === "boolean"
@@ -119,6 +136,7 @@ function normalize(raw: Record<string, unknown>): ModelConfig {
           (REASONING_LEVELS as readonly string[]).includes(l),
         )
       : [],
+    contextLimit: parseContextLimit(raw.contextLimit),
     createdAt: Number(raw.createdAt ?? Date.now()),
     updatedAt: Number(raw.updatedAt ?? Date.now()),
   };
@@ -151,11 +169,13 @@ export interface ModelConfigInput {
   modelId: string;
   baseUrl: string;
   apiKey: string;
+  avatar: string;
   reasoningPassback: boolean;
   passbackMode: PassbackMode;
   passbackField: string;
   thinkingEnabled: boolean;
   effortLevels: string[];
+  contextLimit: number;
 }
 
 /** 服务端入库前的统一校验与清洗，客户端与 API 路由共用 */
@@ -180,6 +200,15 @@ export function sanitizeModelInput(
     return { ok: false, error: "请填写自定义回传字段名" };
   }
 
+  // 头像：空串 = 无头像；有值时必须是 data URL（客户端已裁剪到 128px）
+  const avatarRaw = r.avatar === undefined ? "" : r.avatar;
+  if (typeof avatarRaw !== "string" || avatarRaw.length > 700_000) {
+    return { ok: false, error: "头像数据过大或格式不对" };
+  }
+  if (avatarRaw && !avatarRaw.startsWith("data:image/")) {
+    return { ok: false, error: "头像必须是图片文件" };
+  }
+
   return {
     ok: true,
     value: {
@@ -188,6 +217,7 @@ export function sanitizeModelInput(
       modelId,
       baseUrl: String(r.baseUrl ?? "").trim(),
       apiKey: String(r.apiKey ?? "").trim(),
+      avatar: avatarRaw,
       reasoningPassback: Boolean(r.reasoningPassback),
       passbackMode,
       passbackField,
@@ -198,6 +228,7 @@ export function sanitizeModelInput(
               typeof l === "string" && (REASONING_LEVELS as readonly string[]).includes(l),
           )
         : [],
+      contextLimit: parseContextLimit(r.contextLimit),
     },
   };
 }

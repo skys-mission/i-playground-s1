@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 
 const LINKS = [
   { href: "/", label: "主页" },
+  { href: "/games/gomoku", label: "五子棋" },
   { href: "/models", label: "模型配置" },
 ];
 

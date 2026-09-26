@@ -1,28 +1,7 @@
 import Link from "next/link";
 import { SiteNav } from "@/components/SiteNav";
 
-const GAMES = [
-  {
-    icon: "⚔️",
-    name: "辩论对决",
-    desc: "正反方各执一词，唇枪舌剑，观众投票定胜负",
-  },
-  {
-    icon: "⚡",
-    name: "抢答竞速",
-    desc: "同一道题多家模型作答，比准头也比速度",
-  },
-  {
-    icon: "🎭",
-    name: "角色扮演",
-    desc: "给模型分配角色与剧本，看谁的演技更逼真",
-  },
-  {
-    icon: "♟️",
-    name: "策略博弈",
-    desc: "囚徒困境、拍卖博弈，斗智斗勇的心理战",
-  },
-];
+const MORE_GAMES = ["辩论对决", "抢答竞速", "角色扮演", "策略博弈"];
 
 export default function Home() {
   return (
@@ -65,35 +44,35 @@ export default function Home() {
             </span>
           </Link>
 
-          {/* 游戏类型：占位 */}
-          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6">
+          {/* 五子棋：可用入口 */}
+          <Link
+            href="/games/gomoku"
+            className="group relative overflow-hidden rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] p-6 transition-colors hover:border-amber-400/60"
+          >
             <div className="flex items-start justify-between">
               <div className="text-4xl" aria-hidden>
-                🎮
+                ⚫⚪
               </div>
-              <span className="rounded-full bg-white/5 px-2.5 py-1 text-xs text-neutral-500 ring-1 ring-white/10">
-                敬请期待
+              <span className="rounded-full bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-300 ring-1 ring-amber-400/30">
+                首个玩法 · 可玩
               </span>
             </div>
-            <h2 className="mt-4 text-xl font-bold text-neutral-300">游戏类型</h2>
-            <div className="mt-4 grid grid-cols-2 gap-2">
-              {GAMES.map((game) => (
-                <div
-                  key={game.name}
-                  className="cursor-not-allowed rounded-xl border border-white/5 bg-neutral-900/60 p-3 opacity-70"
-                  title="敬请期待"
-                >
-                  <div className="flex items-center gap-2 text-sm font-medium text-neutral-300">
-                    <span aria-hidden>{game.icon}</span>
-                    {game.name}
-                  </div>
-                  <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-neutral-500">
-                    {game.desc}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
+            <h2 className="mt-4 text-xl font-bold">五子棋 · 人机对战</h2>
+            <p className="mt-2 text-sm leading-relaxed text-neutral-400">
+              挑一位配置好的模型当对手，手绘漫画风棋盘上一决胜负。
+              支持执黑/执白、悔棋与思维链围观。
+            </p>
+            <span className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-amber-300">
+              进入对局
+              <span className="transition-transform group-hover:translate-x-1" aria-hidden>
+                →
+              </span>
+            </span>
+            <p className="mt-4 border-t border-white/5 pt-3 text-xs text-neutral-600">
+              更多玩法即将登场：
+              {MORE_GAMES.map((name) => ` ${name}`).join(" ·")}
+            </p>
+          </Link>
         </section>
       </main>
 
