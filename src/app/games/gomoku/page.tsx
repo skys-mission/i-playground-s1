@@ -30,6 +30,7 @@ import {
   type Swap2State,
 } from "@/lib/swap2";
 import { protocolMeta } from "@/lib/models";
+import { plainThinkText } from "@/lib/think-text";
 import {
   getModelsServerSnapshot,
   getModelsSnapshot,
@@ -126,7 +127,8 @@ export default function GomokuPage() {
     const parts: string[] = [];
     if (thinkDropped.current > 0) parts.push(`⋯ 前 ${thinkDropped.current} 轮思考已省略 ⋯`);
     for (const r of thinkRounds.current) {
-      if (r.text) parts.push(`${r.label}\n${r.text}`);
+      // 展示层剥掉推理摘要自带的 Markdown 记号，原始文本留作轮次裁剪的计量基准
+      if (r.text) parts.push(`${r.label}\n${plainThinkText(r.text)}`);
     }
     return parts.join("\n\n");
   }, []);

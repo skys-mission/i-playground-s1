@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState } from "react";
+import { plainThinkText } from "./think-text";
 
 /** 思维链展示的性能防线：
  *  - 增量先写进 ref，按 THINK_FLUSH_MS 节流刷新 state，避免逐 delta 重渲染
@@ -22,7 +23,8 @@ export function useThinkStream() {
     const parts: string[] = [];
     if (dropped.current > 0) parts.push(`⋯ 前 ${dropped.current} 轮思考已省略 ⋯`);
     for (const r of rounds.current) {
-      if (r.text) parts.push(`${r.label}\n${r.text}`);
+      // 展示层剥掉推理摘要自带的 Markdown 记号，原始文本留作轮次裁剪的计量基准
+      if (r.text) parts.push(`${r.label}\n${plainThinkText(r.text)}`);
     }
     return parts.join("\n\n");
   }, []);

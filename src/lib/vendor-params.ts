@@ -111,6 +111,44 @@ export interface ThinkFallback {
   note: string;
 }
 
+/** 「端点+模型 → 最近一次成功的思考形态」缓存（进程内存活）。
+ *  严格 schema 的端点会拒收不认识的形态，首发被拒再降级等于每手都白付一次请求；
+ *  记住可用形态后，同一端点模型的后续请求直接按它发。进程重启/热重载后自然重探 */
+const knownShapes = new Map<string, ThinkState>();
+
+export function thinkShapeKey(baseUrl: string, modelId: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}|${modelId}`;
+}
+
+/** 把本次请求的思考意图套进已知可用形态：取值（effort 等）随本次请求，字段形态随缓存 */
+export function applyKnownThinkShape(state: ThinkState | null, key: string): ThinkState | null {
+  const known = knownShapes.get(key);
+  if (!state || !known || known.protocol !== state.protocol) return state;
+  const next = { ...state };
+  if (next.protocol === "anthropic-messages") {
+    // 只压形态不压取值：known 里 adaptive/null 的沿用，enabled/disabled 形态不套
+    // （disabled 是「本次想关」的结果，不能反过来关掉下次想开的请求）
+    if (known.thinking === null) next.thinking = null;
+    else if (known.thinking.type === "adaptive") next.thinking = { type: "adaptive" };
+    if (known.effort === null) next.effort = null;
+  } else if (known.openai === null) {
+    next.openai = null;
+  } else {
+    const knownReasoning = known.openai.reasoning as Record<string, unknown> | undefined;
+    const thisReasoning = next.openai?.reasoning as Record<string, unknown> | undefined;
+    if (knownReasoning && !("summary" in knownReasoning) && thisReasoning && "summary" in thisReasoning) {
+      const rest = { ...thisReasoning };
+      delete rest.summary;
+      next.openai = { reasoning: rest };
+    }
+  }
+  return next;
+}
+
+export function rememberThinkShape(key: string, state: ThinkState): void {
+  knownShapes.set(key, state);
+}
+
 /** 端点不认识该字段（严格 schema 直接拒收） */
 const FIELD_REJECTED = /extra input|not permitted|unrecogni|unexpected|unknown field/;
 /** 字段认识但取值/形态不被接受 */

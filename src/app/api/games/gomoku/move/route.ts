@@ -16,9 +16,12 @@ import {
 } from "@/lib/gomoku";
 import {
   anthropicThinkingOn,
+  applyKnownThinkShape,
   applyThinkFallback,
   buildThinkParams,
   initThinkState,
+  rememberThinkShape,
+  thinkShapeKey,
   type ThinkState,
 } from "@/lib/vendor-params";
 
@@ -131,9 +134,14 @@ async function callModel(
   emitNotice: (text: string) => void,
 ): Promise<CallResult> {
   const base = row.baseUrl.replace(/\/+$/, "");
-  // 思考参数形态：各端点接受的字段不一，被 4xx 拒绝时按错误提示降级重试（最多两次）。
+  // 思考参数形态：各端点接受的字段不一，被 4xx 拒绝时按错误提示降级重试（最多两次）；
+  // 同一端点+模型若已有成功形态，直接按它首发，省掉注定被拒的探路请求。
   // 采样参数（temperature/top_p）一律不传用默认值：推理模型普遍拒绝非默认采样参数
-  let thinkState: ThinkState | null = initThinkState(row, opts.effort, opts.thinking);
+  const shapeKey = thinkShapeKey(row.baseUrl, row.modelId);
+  let thinkState: ThinkState | null = applyKnownThinkShape(
+    initThinkState(row, opts.effort, opts.thinking),
+    shapeKey,
+  );
   let res: Response | undefined;
 
   for (let shapeAttempt = 0; ; shapeAttempt++) {
@@ -203,7 +211,10 @@ async function callModel(
       };
     }
 
-    if (res.ok) break;
+    if (res.ok) {
+      if (thinkState) rememberThinkShape(shapeKey, thinkState);
+      break;
+    }
     const text = await res.text();
     let data: unknown = null;
     try {
@@ -303,6 +314,14 @@ async function callModel(
     return { ok: false, error: "思考太长被截断，没有产出落子", retryable: true };
   }
   if (!content.trim()) return { ok: false, error: "模型返回了空内容" };
+  // 开了思考却整轮一个字都没回来：可能是网关剥离 reasoning（token 照计），
+  // 也可能是模型自己没展开思考。中性告知一句，免得思维链面板空着像出了故障
+  const thinkingRequested = thinkState
+    ? thinkState.protocol === "anthropic-messages"
+      ? anthropicThinkingOn(thinkState)
+      : thinkState.openai !== null
+    : false;
+  if (thinkingRequested && !thinking.trim()) emitNotice("本轮未回传思维文本");
   return { ok: true, content, thinking };
 }
 
