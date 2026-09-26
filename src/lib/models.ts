@@ -21,7 +21,7 @@ export const PROTOCOLS: ProtocolMeta[] = [
     suggestedModel: "gpt-4o",
     badgeClass: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30",
     reasoningDefault: false,
-    thinkingHint: "调用时是否思考，等级即请求传递的推理努力取值。",
+    thinkingHint: "调用时是否思考；等级即 reasoning_effort 取值，none=不思考。",
   },
   {
     id: "openai-responses",
@@ -30,7 +30,7 @@ export const PROTOCOLS: ProtocolMeta[] = [
     suggestedModel: "gpt-5",
     badgeClass: "bg-teal-500/15 text-teal-300 ring-teal-500/30",
     reasoningDefault: true,
-    thinkingHint: "调用时是否思考，等级对应 reasoning.effort 取值。",
+    thinkingHint: "调用时是否思考；等级即 reasoning.effort 取值，none=不思考。",
   },
   {
     id: "anthropic-messages",
@@ -39,7 +39,8 @@ export const PROTOCOLS: ProtocolMeta[] = [
     suggestedModel: "claude-sonnet-4-5",
     badgeClass: "bg-orange-500/15 text-orange-300 ring-orange-500/30",
     reasoningDefault: true,
-    thinkingHint: "调用时是否思考，等级对应 output_config.effort 取值。",
+    thinkingHint:
+      "等级经 output_config.effort 传递（minimal 按 low、none=关思考）；新旧模型的思考参数形态自动兼容。",
   },
 ];
 
@@ -47,8 +48,11 @@ export function protocolMeta(id: ProtocolId): ProtocolMeta {
   return PROTOCOLS.find((p) => p.id === id) ?? PROTOCOLS[0];
 }
 
-/** 推理努力等级全集：与请求中传递的字段值一致，小写原样，不额外转换 */
+/** 推理努力等级全集（各家取值之并，用户按模型实际支持的勾选）：
+ *  none=不思考（gpt-5.1+ / DeepSeek / 火山 Ark 等；Anthropic 协议发送时映射为关思考）。
+ *  值与请求字段一致，小写原样，不额外转换 */
 export const REASONING_LEVELS = [
+  "none",
   "minimal",
   "low",
   "medium",

@@ -585,7 +585,9 @@ export default function ModelsPage() {
                 </p>
 
                 <div className="mt-2.5 border-t border-white/5 pt-2.5">
-                  <p className="text-xs text-neutral-400">支持的推理努力等级：</p>
+                  <p className="text-xs text-neutral-400">
+                    支持的推理努力等级（按该模型实际支持的勾选，none=不思考）：
+                  </p>
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {REASONING_LEVELS.map((level) => {
                       const active = form.effortLevels.includes(level);

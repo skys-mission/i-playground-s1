@@ -13,6 +13,13 @@ import {
   type Move,
   type Stone,
 } from "@/lib/gomoku";
+import {
+  anthropicThinkingOn,
+  applyThinkFallback,
+  buildThinkParams,
+  initThinkState,
+  type ThinkState,
+} from "@/lib/vendor-params";
 
 /** AI 一手的整体耗时上限（推理模型可能较慢） */
 const TIMEOUT_MS = 180_000;
@@ -31,28 +38,19 @@ function str(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
-/** 按模型配置生成推理参数：不做厂商特判，各协议只用自家的标准字段。
- *  开关关闭时也要显式关（有的端点思考默认开启，例如 deepseek-flash，缺省参数会被当成开） */
-function thinkingParams(
-  row: ModelConfigRow,
-  effort: string | undefined,
-  enabled: boolean,
-): Record<string, unknown> {
-  if (!row.thinkingEnabled) return {};
-  const level = effort && row.effortLevels.includes(effort) ? effort : null;
-  switch (row.protocol) {
-    case "openai-chat":
-      return enabled && level ? { reasoning_effort: level } : {};
-    case "openai-responses":
-      return enabled && level ? { reasoning: { effort: level } } : {};
-    case "anthropic-messages":
-      // Messages 协议没有 effort 概念，开关即协议标准的 enabled/disabled
-      return enabled
-        ? { thinking: { type: "enabled", budget_tokens: 2048 } }
-        : { thinking: { type: "disabled" } };
-    default:
-      return {};
+/** OpenAI 系响应里的思考内容：reasoning_content（DeepSeek 系）/ reasoning（OpenRouter 等）
+ *  是字符串，reasoning_details（OpenRouter 新版）是数组，统一取增量文本 */
+function deltaReasoning(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (!Array.isArray(v)) return "";
+  let s = "";
+  for (const item of v) {
+    const rec = asRecord(item);
+    if (!rec) continue;
+    if (typeof rec.text === "string") s += rec.text;
+    else if (typeof rec.delta === "string") s += rec.delta;
   }
+  return s;
 }
 
 type CallResult =
@@ -95,7 +93,10 @@ function extractNonStream(protocol: string, rec: Record<string, unknown>): { con
     const message = asRecord(asRecord(asArray(rec.choices)[0])?.message);
     content = str(message?.content);
     // 接收侧兼容：reasoning_content（DeepSeek 系）与 reasoning
-    thinking = str(message?.reasoning_content) || str(message?.reasoning);
+    thinking =
+      deltaReasoning(message?.reasoning_content) ||
+      deltaReasoning(message?.reasoning) ||
+      deltaReasoning(message?.reasoning_details);
   } else if (protocol === "openai-responses") {
     content = str(rec.output_text);
     for (const item of asArray(rec.output)) {
@@ -126,78 +127,82 @@ async function callModel(
   user: string,
   opts: { effort?: string; thinking: boolean; anthropicMaxTokens?: number },
   emitThinking: EmitThinking,
+  emitNotice: (text: string) => void,
 ): Promise<CallResult> {
   const base = row.baseUrl.replace(/\/+$/, "");
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "text/event-stream",
-  };
-  const think = thinkingParams(row, opts.effort, opts.thinking);
-  // 思考开启时输出上限放大（思考本身耗 token）；显式 disabled 时维持小上限
-  const thinkEnabled = asRecord(think.thinking)?.type === "enabled";
-  let url: string;
-  let body: Record<string, unknown>;
+  // 思考参数形态：各端点接受的字段不一，被 4xx 拒绝时按错误提示降级重试（最多两次）。
+  // 采样参数（temperature/top_p）一律不传用默认值：推理模型普遍拒绝非默认采样参数
+  let thinkState: ThinkState | null = initThinkState(row, opts.effort, opts.thinking);
+  let res: Response | undefined;
 
-  switch (row.protocol) {
-    case "openai-chat":
-      url = `${base}/chat/completions`;
-      headers.Authorization = `Bearer ${row.apiKey}`;
-      body = {
-        model: row.modelId,
-        temperature: 0,
-        stream: true,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        ...think,
-      };
-      break;
-    case "openai-responses":
-      url = `${base}/responses`;
-      headers.Authorization = `Bearer ${row.apiKey}`;
-      body = { model: row.modelId, instructions: system, input: user, stream: true, ...think };
-      break;
-    case "anthropic-messages":
-      url = `${base}/v1/messages`;
-      headers["x-api-key"] = row.apiKey;
-      headers["anthropic-version"] = "2023-06-01";
-      body = {
-        model: row.modelId,
-        max_tokens: opts.anthropicMaxTokens ?? (thinkEnabled ? 8192 : 2048),
-        temperature: 0,
-        stream: true,
-        system,
-        messages: [{ role: "user", content: user }],
-        ...think,
-      };
-      break;
-    default:
-      return { ok: false, error: `未知协议：${row.protocol}` };
-  }
-
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-  } catch (e) {
-    const aborted =
-      e instanceof DOMException || (e instanceof Error && e.name === "TimeoutError");
-    return {
-      ok: false,
-      error: aborted
-        ? `模型请求超时（上限 ${TIMEOUT_MS / 1000}s）`
-        : e instanceof Error
-          ? e.message
-          : String(e),
+  for (let shapeAttempt = 0; ; shapeAttempt++) {
+    const think = buildThinkParams(thinkState);
+    // 思考开启时输出上限放大（思考本身耗 token）；关或彻底不带时维持小上限
+    const thinkOn = anthropicThinkingOn(thinkState);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
     };
-  }
+    let url: string;
+    let body: Record<string, unknown>;
 
-  if (!res.ok) {
+    switch (row.protocol) {
+      case "openai-chat":
+        url = `${base}/chat/completions`;
+        headers.Authorization = `Bearer ${row.apiKey}`;
+        body = {
+          model: row.modelId,
+          stream: true,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+          ...think,
+        };
+        break;
+      case "openai-responses":
+        url = `${base}/responses`;
+        headers.Authorization = `Bearer ${row.apiKey}`;
+        body = { model: row.modelId, instructions: system, input: user, stream: true, ...think };
+        break;
+      case "anthropic-messages":
+        url = `${base}/v1/messages`;
+        headers["x-api-key"] = row.apiKey;
+        headers["anthropic-version"] = "2023-06-01";
+        body = {
+          model: row.modelId,
+          max_tokens: opts.anthropicMaxTokens ?? (thinkOn ? 8192 : 2048),
+          stream: true,
+          system,
+          messages: [{ role: "user", content: user }],
+          ...think,
+        };
+        break;
+      default:
+        return { ok: false, error: `未知协议：${row.protocol}` };
+    }
+
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+    } catch (e) {
+      const aborted =
+        e instanceof DOMException || (e instanceof Error && e.name === "TimeoutError");
+      return {
+        ok: false,
+        error: aborted
+          ? `模型请求超时（上限 ${TIMEOUT_MS / 1000}s）`
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      };
+    }
+
+    if (res.ok) break;
     const text = await res.text();
     let data: unknown = null;
     try {
@@ -207,11 +212,20 @@ async function callModel(
     }
     const rec = asRecord(data);
     const errRec = asRecord(rec?.error);
-    return {
-      ok: false,
-      error: `HTTP ${res.status}：${str(errRec?.message) || res.statusText || "请求失败"}`,
-    };
+    const errMsg = str(errRec?.message) || res.statusText || "请求失败";
+    const fb =
+      thinkState && shapeAttempt < 2
+        ? applyThinkFallback(thinkState, res.status, errMsg)
+        : null;
+    if (fb) {
+      thinkState = fb.state;
+      emitNotice(fb.note);
+      continue;
+    }
+    return { ok: false, error: `HTTP ${res.status}：${errMsg}` };
   }
+
+  if (!res) return { ok: false, error: "请求未发出" };
 
   let content = "";
   let thinking = "";
@@ -241,7 +255,10 @@ async function callModel(
         if (!delta) return;
         const c = str(delta.content);
         if (c) content += c;
-        const th = str(delta.reasoning_content) || str(delta.reasoning);
+        const th =
+          deltaReasoning(delta.reasoning_content) ||
+          deltaReasoning(delta.reasoning) ||
+          deltaReasoning(delta.reasoning_details);
         if (th) {
           thinking += th;
           emitThinking(th);
@@ -472,7 +489,7 @@ export async function POST(req: NextRequest) {
             effort,
             thinking,
             anthropicMaxTokens: attempt === 0 ? undefined : 32768,
-          }, (delta) => send({ type: "thinking", delta }));
+          }, (delta) => send({ type: "thinking", delta }), (text) => send({ type: "notice", text }));
           if (!call.ok) {
             // 思考截断属于可纠正失败：带着「压缩思考」的反馈再试一次
             if (call.retryable && attempt < MAX_ATTEMPTS - 1) {
