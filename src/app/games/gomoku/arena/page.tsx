@@ -582,29 +582,15 @@ export default function ArenaPage() {
               <p className="mt-0.5 text-xs text-neutral-600">{status.sub || "\u00A0"}</p>
             </SpeechBubble>
 
-            {phase === "setup" && (
+            {phase === "setup" && models.length === 0 && (
               <p className="mt-2 shrink-0 text-center text-xs text-neutral-500">
-                {models.length === 0 ? (
-                  <>
-                    还没有选手，
-                    <Link
-                      href="/models"
-                      className="font-bold text-[#B45309] underline underline-offset-2"
-                    >
-                      去模型配置页添加 →
-                    </Link>
-                  </>
-                ) : (
-                  <>
-                    想亲自上场？
-                    <Link
-                      href="/games/gomoku"
-                      className="font-bold text-[#B45309] underline underline-offset-2"
-                    >
-                      人机对战 →
-                    </Link>
-                  </>
-                )}
+                还没有选手，
+                <Link
+                  href="/models"
+                  className="font-bold text-[#B45309] underline underline-offset-2"
+                >
+                  去模型配置页添加 →
+                </Link>
               </p>
             )}
           </div>
