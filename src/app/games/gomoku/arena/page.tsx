@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Avatar } from "@/components/Avatar";
 import { GomokuBoard } from "@/components/GomokuBoard";
 import { SiteNav } from "@/components/SiteNav";
@@ -15,6 +15,18 @@ import {
   type Stone,
   type WinInfo,
 } from "@/lib/gomoku";
+import type { Swap2Choice } from "@/lib/gomoku";
+import {
+  SWAP2_INITIAL,
+  applySwap2Choice,
+  isSwap2Resolved,
+  swap2BlackSeat,
+  swap2OpeningLen,
+  swap2Pending,
+  swap2StageOf,
+  type Seat,
+  type Swap2State,
+} from "@/lib/swap2";
 import { protocolMeta } from "@/lib/models";
 import {
   getModelsServerSnapshot,
@@ -26,6 +38,9 @@ import { useThinkStream } from "@/lib/useThinkStream";
 
 type Phase = "setup" | "playing";
 
+/** 开局规则：Swap2（标准竞技开局）或自由开局（黑先） */
+type Rule = "swap2" | "free";
+
 type ModelInfo = ReturnType<typeof getModelsSnapshot>[number];
 
 /** 落子接口的流式事件（NDJSON，一行一个） */
@@ -33,13 +48,15 @@ type StreamEvent =
   | { type: "thinking"; delta: string }
   | { type: "notice"; text: string }
   | { type: "move"; move: { row: number; col: number }; speech?: string }
+  | { type: "swap"; choice: Swap2Choice; speech?: string }
   | { type: "error"; error: string };
 
 /** 一侧选手的配置 */
 type SideCfg = { modelId: string; effort: string; thinkingOn: boolean; speechOn: boolean };
 
-/** 已公开的一句台词：给对手的模型看，思维链则永不外泄 */
-type SpeechEntry = { stone: Stone; text: string };
+/** 已公开的一句台词：给对手的模型看，思维链则永不外泄。
+ *  按席位存档——Swap2 定色可能对调席位与颜色，跟着席位走才不会串人 */
+type SpeechEntry = { seat: Seat; text: string };
 
 /** 自动对局两手之间的缓冲，方便观战阅读 */
 const MOVE_GAP_MS = 600;
@@ -228,6 +245,8 @@ export default function ArenaPage() {
   );
   const [phase, setPhase] = useState<Phase>("setup");
   const [moves, setMoves] = useState<Move[]>([]);
+  const [rule, setRule] = useState<Rule>("swap2");
+  const [swap2, setSwap2] = useState<Swap2State | null>(null);
   const [black, setBlack] = useState<SideCfg>({ modelId: "", effort: "", thinkingOn: true, speechOn: true });
   const [white, setWhite] = useState<SideCfg>({ modelId: "", effort: "", thinkingOn: true, speechOn: true });
   const [speechLog, setSpeechLog] = useState<SpeechEntry[]>([]);
@@ -238,12 +257,14 @@ export default function ArenaPage() {
   const blackThink = useThinkStream();
   const whiteThink = useThinkStream();
 
-  // gameToken：重开/回配置后让在途请求的回调失效；startedPly：防同一局面重复请求
+  // gameToken：重开/回配置后让在途请求的回调失效；startedPly：防同一局面重复请求（阶段:手数:席位）
   const gameToken = useRef(0);
-  const startedPly = useRef(-1);
+  const startedPly = useRef("");
   const logRef = useRef<HTMLDivElement | null>(null);
 
-  // 派生值：黑方默认第一位选手，白方默认第二位（没有则与黑方同一位）
+  // 派生值：黑方默认第一位选手，白方默认第二位（没有则与黑方同一位）。
+  // Swap2 下 black/white 配置实为「席位」：a = 开局摆子方（暂定黑），b = 应对方（暂定白），
+  // 定色后席位与颜色的映射可能对调，面板按 stoneSeat() 取真正的执子方
   const blackModel =
     models.find((m) => m.id === (black.modelId || models[0]?.id)) ?? null;
   const whiteModel =
@@ -260,6 +281,36 @@ export default function ArenaPage() {
 
   const ended = win !== null || draw;
 
+  // Swap2 派生：协议未走完时席位按暂定颜色显示，定色后按真实执子映射
+  const pending = swap2 ? swap2Pending(swap2, moves.length) : null;
+  const resolved = swap2 !== null && isSwap2Resolved(swap2);
+  const seatStone = useCallback(
+    (seat: Seat): Stone =>
+      !swap2 || !resolved
+        ? seat === "a"
+          ? "black"
+          : "white"
+        : seat === swap2BlackSeat(swap2)
+          ? "black"
+          : "white",
+    [swap2, resolved],
+  );
+  const stoneSeat = useCallback(
+    (stone: Stone): Seat => (seatStone("a") === stone ? "a" : "b"),
+    [seatStone],
+  );
+  // 当前应行动的席位（协议阶段 = 摆子/抉择方；定色后 = 按奇偶轮到的执子方）。
+  // 暂停/出错不改变行动归属，故不在条件内；「正在思考」等展示另有 streaming 开关把关
+  const actorSeat: Seat | null =
+    phase === "playing" && !ended
+      ? pending
+        ? pending.seat
+        : stoneSeat(turn)
+      : null;
+  // 席位名（状态行用）
+  const seatNameOf = (seat: Seat | null) =>
+    seat === null ? "选手" : ((seat === "a" ? blackModel : whiteModel)?.name ?? "选手");
+
   // 对局记录滚到最新
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
@@ -267,8 +318,9 @@ export default function ArenaPage() {
 
   const resetMatch = () => {
     gameToken.current++;
-    startedPly.current = -1;
+    startedPly.current = "";
     setMoves([]);
+    setSwap2(rule === "swap2" ? SWAP2_INITIAL : null);
     setSpeechLog([]);
     blackThink.reset();
     whiteThink.reset();
@@ -289,32 +341,50 @@ export default function ArenaPage() {
 
   const retryMove = () => setError(null);
 
-  // 自动对局引擎：轮到哪边就替哪边流式请求一手；暂停/终局/出错即停。
+  // 自动对局引擎：Swap2 协议阶段由阶段决定行动方（摆子/抉择），
+  // 定色后轮到哪色就替哪席位流式请求一手；暂停/终局/出错即停。
   // 给对手的只有名字和最近几句台词——思维链各归各的展示框，永不进对方输入
   useEffect(() => {
     if (phase !== "playing" || ended || paused || error) return;
     if (busyStone) return;
     if (!isModelsLoaded()) return;
-    if (startedPly.current === moves.length) return;
-    const stone = turn;
-    const cfg = stone === "black" ? black : white;
-    const model = stone === "black" ? blackModel : whiteModel;
-    startedPly.current = moves.length;
+    const pendingNow = swap2 ? swap2Pending(swap2, moves.length) : null;
+    const seat: Seat = pendingNow ? pendingNow.seat : stoneSeat(turn);
+    const stage = pendingNow
+      ? swap2StageOf(pendingNow, moves.length)
+      : swap2
+        ? ("done" as const)
+        : undefined;
+    const key = `${stage ?? "-"}:${moves.length}:${seat}`;
+    if (startedPly.current === key) return;
+    startedPly.current = key;
+    const stone = turn; // 棋子颜色恒按手数奇偶（开局摆子同样适用）
+    const panelStone = seatStone(seat); // 行动方所在面板（思维链/忙碌指示挂在这）
+    const cfg = seat === "a" ? black : white;
+    const model = seat === "a" ? blackModel : whiteModel;
     const ply = moves.length + 1;
     const token = gameToken.current;
     const timer = setTimeout(() => {
       (async () => {
         if (!model) {
-          setError({ stone, msg: "选手的模型配置不存在，请回配置重选" });
+          setError({ stone: panelStone, msg: "选手的模型配置不存在，请回配置重选" });
           return;
         }
         const effortLevels = model.thinkingEnabled ? model.effortLevels : [];
         const effort = effortLevels.includes(cfg.effort) ? cfg.effort : (effortLevels[0] ?? "");
-        setBusyStone(stone);
-        const ts = stone === "black" ? blackThink : whiteThink;
-        ts.beginRound(ply, `── 第 ${ply} 手 · ${stone === "black" ? "黑" : "白"} ──`);
-        const opponentStone: Stone = stone === "black" ? "white" : "black";
-        const opponent = opponentStone === "black" ? blackModel : whiteModel;
+        setBusyStone(panelStone);
+        const ts = seat === "a" ? blackThink : whiteThink;
+        const roundLabel =
+          stage === "choose1" || stage === "choose2"
+            ? `── SWAP2 抉择 · ${panelStone === "black" ? "黑席" : "白席"} ──`
+            : stage === "place3"
+              ? `── 开局摆子 · 第 ${ply} 手 ──`
+              : stage === "place2"
+                ? `── 加摆两子 · 第 ${ply} 手 ──`
+                : `── 第 ${ply} 手 · ${stone === "black" ? "黑" : "白"} ──`;
+        ts.beginRound(ply, roundLabel);
+        const opponentSeat: Seat = seat === "a" ? "b" : "a";
+        const opponent = opponentSeat === "a" ? blackModel : whiteModel;
         try {
           const res = await fetch("/api/games/gomoku/move", {
             method: "POST",
@@ -325,10 +395,11 @@ export default function ArenaPage() {
               effort: effort || undefined,
               thinking: model.thinkingEnabled === true && cfg.thinkingOn,
               speech: cfg.speechOn,
+              swap2: stage,
               moves: moves.map(({ row, col }) => ({ row, col })),
               opponentName: opponent?.name ?? "",
               opponentSpeech: speechLog
-                .filter((s) => s.stone === opponentStone)
+                .filter((s) => s.seat === opponentSeat)
                 .slice(-3)
                 .map((s) => s.text),
             }),
@@ -339,13 +410,14 @@ export default function ArenaPage() {
             const data = (await res.json().catch(() => null)) as { error?: string } | null;
             if (gameToken.current !== token) return;
             setBusyStone(null);
-            setError({ stone, msg: data?.error ?? `请求失败（HTTP ${res.status}）` });
+            setError({ stone: panelStone, msg: data?.error ?? `请求失败（HTTP ${res.status}）` });
             return;
           }
           const reader = res.body!.getReader();
           const dec = new TextDecoder();
           let buf = "";
           let mv: { row: number; col: number } | null = null;
+          let choice: Swap2Choice | null = null;
           let speechText = "";
           let errMsg = "";
           const handleEvent = (ev: StreamEvent) => {
@@ -355,6 +427,9 @@ export default function ArenaPage() {
             else if (ev.type === "notice") ts.appendNotice(ev.text);
             else if (ev.type === "move") {
               mv = ev.move;
+              speechText = ev.speech ?? "";
+            } else if (ev.type === "swap") {
+              choice = ev.choice;
               speechText = ev.speech ?? "";
             } else if (ev.type === "error") errMsg = ev.error;
           };
@@ -382,27 +457,32 @@ export default function ArenaPage() {
           if (gameToken.current !== token) return;
           setBusyStone(null);
           if (errMsg) {
-            setError({ stone, msg: errMsg });
+            setError({ stone: panelStone, msg: errMsg });
+            return;
+          }
+          if (choice) {
+            if (speechText) setSpeechLog((prev) => [...prev, { seat, text: speechText }]);
+            setSwap2((prev) => (prev ? applySwap2Choice(prev, choice!) : prev));
             return;
           }
           if (!mv) {
-            setError({ stone, msg: "连接中断" });
+            setError({ stone: panelStone, msg: "连接中断" });
             return;
           }
           const { row, col } = mv;
-          if (speechText) setSpeechLog((prev) => [...prev, { stone, text: speechText }]);
+          if (speechText) setSpeechLog((prev) => [...prev, { seat, text: speechText }]);
           setMoves((prev) => [...prev, { row, col, stone }]);
         } catch {
           if (gameToken.current === token) {
             setBusyStone(null);
-            setError({ stone, msg: "网络请求失败" });
+            setError({ stone: panelStone, msg: "网络请求失败" });
           }
         }
       })();
     }, MOVE_GAP_MS);
     return () => {
       clearTimeout(timer);
-      startedPly.current = -1;
+      startedPly.current = "";
     };
     // cleanup 里重置 startedPly：暂停后恢复、出错后重试都能重新发起这一手
   }, [
@@ -413,6 +493,7 @@ export default function ArenaPage() {
     busyStone,
     turn,
     moves,
+    swap2,
     speechLog,
     black,
     white,
@@ -420,6 +501,8 @@ export default function ArenaPage() {
     whiteModel,
     blackThink,
     whiteThink,
+    seatStone,
+    stoneSeat,
   ]);
 
   const streaming =
@@ -432,10 +515,9 @@ export default function ArenaPage() {
         ? { title: "还没有选手", sub: "先去模型配置页请两位选手上场" }
         : { title: "准备开局", sub: "左右各选一位选手，按「开始对局」" };
     }
-    const cur = turn === "black" ? blackModel : whiteModel;
-    const curName = cur?.name ?? "选手";
     if (win) {
-      const winnerName = (win.stone === "black" ? blackModel : whiteModel)?.name ?? "选手";
+      const winnerSeat = stoneSeat(win.stone);
+      const winnerName = (winnerSeat === "a" ? blackModel : whiteModel)?.name ?? "选手";
       return {
         title: `${winnerName} 五连制胜！`,
         sub: win.stone === "black" ? "黑方拿下了这场对决" : "白方拿下了这场对决",
@@ -443,11 +525,40 @@ export default function ArenaPage() {
     }
     if (draw) return { title: "平局", sub: "棋盘上已经没有空位了" };
     if (error) {
-      const errName = (error.stone === "black" ? blackModel : whiteModel)?.name ?? "选手";
+      const errName =
+        (stoneSeat(error.stone) === "a" ? blackModel : whiteModel)?.name ?? "选手";
       return { title: `${errName} 落子失败`, sub: "处理一下，重试后比赛继续" };
     }
-    if (paused)
-      return { title: "已暂停", sub: `轮到 ${curName}（${turn === "black" ? "黑" : "白"}方）` };
+    if (paused) {
+      const name = seatNameOf(actorSeat);
+      // 开局阶段的行动是代摆/抉择，不按颜色轮转，括号里写下一手棋色而非「X方」
+      const sub = pending
+        ? pending.act === "place"
+          ? `轮到 ${name} 摆开局子（下一手${turn === "black" ? "黑" : "白"}）`
+          : `轮到 ${name} 做 Swap2 抉择`
+        : `轮到 ${name}（${turn === "black" ? "黑" : "白"}方）`;
+      return { title: "已暂停", sub };
+    }
+    // Swap2 开局阶段
+    if (pending) {
+      const name = seatNameOf(pending.seat);
+      if (pending.act === "place") {
+        return pending.seat === "a"
+          ? { title: `${name} 正在摆开局`, sub: `第 ${moves.length + 1}/3 手 · Swap2 开局阶段` }
+          : { title: `${name} 正在加摆`, sub: `第 ${moves.length - 2}/2 手 · 修饰局面逼对方定色` };
+      }
+      return moves.length === 3
+        ? { title: `${name} 正在抉择`, sub: "执白 / 换执黑 / 加摆两子" }
+        : { title: `${name} 正在定色`, sub: "执黑 / 执白" };
+    }
+    const curName = seatNameOf(actorSeat);
+    // Swap2 刚定色：说明归属，白方行下一手
+    if (swap2 && resolved && moves.length === swap2OpeningLen(swap2)) {
+      return {
+        title: `Swap2 定色：${seatNameOf("a")} 执${seatStone("a") === "black" ? "黑" : "白"}，${seatNameOf("b")} 执${seatStone("b") === "black" ? "黑" : "白"}`,
+        sub: `白方先行 · 第 ${moves.length + 1} 手起正常对弈`,
+      };
+    }
     return {
       title: `${curName} 正在思考`,
       sub: `第 ${moves.length + 1} 手 · ${turn === "black" ? "黑" : "白"}方 · 台词互相可见，思维链各自保密`,
@@ -476,6 +587,18 @@ export default function ArenaPage() {
               {phase === "setup" ? (
                 <>
                   <ArenaMark className="-rotate-2 max-sm:hidden" />
+                  <label className="flex items-center gap-2 text-xs font-bold text-neutral-600">
+                    开局规则
+                    <select
+                      aria-label="开局规则"
+                      value={rule}
+                      onChange={(e) => setRule(e.target.value === "free" ? "free" : "swap2")}
+                      className="rounded-lg border-[2.5px] border-[#141414] bg-white px-2.5 py-1.5 text-xs font-bold text-[#141414] outline-none"
+                    >
+                      <option value="swap2">⚖️ Swap2 开局</option>
+                      <option value="free">🎲 自由开局 · 黑先</option>
+                    </select>
+                  </label>
                   <button
                     onClick={startMatch}
                     disabled={!isModelsLoaded() || models.length === 0}
@@ -534,7 +657,7 @@ export default function ArenaPage() {
                         </p>
                         <h2 className="mt-2 text-2xl font-black text-[#141414]">
                           {win
-                            ? `${(win.stone === "black" ? blackModel : whiteModel)?.name ?? "选手"} 获胜`
+                            ? `${seatNameOf(stoneSeat(win.stone))} 获胜`
                             : "平局"}
                         </h2>
                         <p className="mt-1 text-xs text-neutral-600">{status.sub}</p>
@@ -554,7 +677,7 @@ export default function ArenaPage() {
               {error && phase === "playing" && (
                 <div className="absolute bottom-4 left-1/2 z-20 w-[min(92%,400px)] -translate-x-1/2 rounded-lg border-[3px] border-[#C0392B] bg-[#F7F0DF] px-4 py-3 text-sm text-[#C0392B] shadow-[5px_5px_0_rgba(0,0,0,0.35)]">
                   <p className="font-bold">
-                    {(error.stone === "black" ? blackModel : whiteModel)?.name ?? "选手"} 落子失败：
+                    {seatNameOf(stoneSeat(error.stone))} 落子失败：
                     {error.msg}
                   </p>
                   <p className="mt-1 text-xs text-neutral-600">对局已暂停</p>
@@ -596,16 +719,19 @@ export default function ArenaPage() {
           </div>
 
           {(["black", "white"] as const).map((stone) => {
-            const cfg = stone === "black" ? black : white;
-            const setCfg = stone === "black" ? setBlack : setWhite;
-            const model = stone === "black" ? blackModel : whiteModel;
-            const ts = stone === "black" ? blackThink : whiteThink;
+            // Swap2 定色可能让席位与颜色对调：面板按席位取配置/模型/思维链，
+            // 开局阶段（未定色）席位与颜色一一对应
+            const seat = stoneSeat(stone);
+            const cfg = seat === "a" ? black : white;
+            const setCfg = seat === "a" ? setBlack : setWhite;
+            const model = seat === "a" ? blackModel : whiteModel;
+            const ts = seat === "a" ? blackThink : whiteThink;
             const thinkingOn = model?.thinkingEnabled === true && cfg.thinkingOn;
             const effortLevels = model?.thinkingEnabled ? model.effortLevels : [];
             const effort = effortLevels.includes(cfg.effort) ? cfg.effort : (effortLevels[0] ?? "");
             const lastSpeech =
-              [...speechLog].reverse().find((s) => s.stone === stone)?.text ?? "";
-            const sideStreaming = streaming && turn === stone;
+              [...speechLog].reverse().find((s) => s.seat === seat)?.text ?? "";
+            const sideStreaming = streaming && actorSeat === seat;
             return (
               <aside
                 key={stone}
@@ -623,6 +749,11 @@ export default function ArenaPage() {
                   <div className="relative flex items-center justify-between gap-2">
                     <h2 className="text-base font-black">
                       {stone === "black" ? "● 黑方" : "○ 白方"}
+                      {phase === "playing" && swap2 && !resolved && (
+                        <span className="ml-1 text-[10px] font-bold text-neutral-400">
+                          暂定
+                        </span>
+                      )}
                     </h2>
                     {phase === "playing" && !ended && sideStreaming && (
                       <span className="animate-pulse text-[10px] font-black tracking-[0.2em] text-[#C0392B]">

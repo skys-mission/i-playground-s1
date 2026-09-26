@@ -1,5 +1,7 @@
 /** 五子棋（Gomoku）核心规则与文本协议：客户端棋盘渲染与服务端 AI 调用共用 */
 
+import type { Swap2Choice } from "./swap2";
+
 export const BOARD_SIZE = 15;
 
 /** 列标签：与提示词、棋盘坐标一致，A-O */
@@ -116,5 +118,35 @@ export function parseAiMove(text: string): { row: number; col: number } | null {
   if (m) {
     return { row: parseInt(m[1], 10) - 1, col: parseInt(m[2], 10) - 1 };
   }
+  return null;
+}
+
+/** Swap2 抉择（choose 阶段）的可选项：协议词汇表定义在 swap2.ts，这里转出给解析器的调用方 */
+export type { Swap2Choice };
+
+/** 从模型回复中解析 Swap2 抉择：执黑 / 执白 /（仅第一次抉择）加摆两子。
+ *  解析不出或语义矛盾时返回 null，交给调用方反馈重试 */
+export function parseSwapChoice(text: string, allowPlace2: boolean): Swap2Choice | null {
+  const t = stripThinkingTags(text);
+  const up = t.toUpperCase();
+
+  // 首选：约定格式 SWAP BLACK / DECIDE: WHITE / SWAP PLACE2
+  const m = up.match(
+    /\b(?:SWAP|CHOICE|CHOOSE|DECIDE|PICK|TAKE)\b\s*[:：]?\s*(BLACK|WHITE|PLACE\s*-?\s*2|(?:TWO|2)\s*MORE)/,
+  );
+  if (m) {
+    if (m[1] === "BLACK") return "black";
+    if (m[1] === "WHITE") return "white";
+    return allowPlace2 ? "place2" : null;
+  }
+  // 次选：中文「加摆/再摆两子」——place2 专属词，先判避免与颜色词误配
+  if (allowPlace2 && /(加摆|再摆|摆两|加两|两颗子|两子)/.test(t)) return "place2";
+  // 次选：中文动词短语 执黑 / 换执白 / 选黑棋 …
+  const zh = t.match(/(?:换\s*执|执|选|换|拿|要|当)\s*[黑白]\s*棋?/);
+  if (zh) return zh[0].includes("黑") ? "black" : "white";
+  // 兜底：裸颜色词——只出现一种颜色才算数，黑白并提（如「黑白均衡」）则放弃
+  const hasBlack = /\bBLACK\b/i.test(up) || t.includes("黑");
+  const hasWhite = /\bWHITE\b/i.test(up) || t.includes("白");
+  if (hasBlack !== hasWhite) return hasBlack ? "black" : "white";
   return null;
 }

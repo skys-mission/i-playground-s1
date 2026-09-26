@@ -15,6 +15,20 @@ import {
   type Stone,
   type WinInfo,
 } from "@/lib/gomoku";
+import type { Swap2Choice } from "@/lib/gomoku";
+import {
+  SWAP2_INITIAL,
+  applySwap2Choice,
+  isSwap2Resolved,
+  otherSeat,
+  seatOfSwap2Move,
+  swap2BlackSeat,
+  swap2OpeningLen,
+  swap2Pending,
+  swap2StageOf,
+  type Seat,
+  type Swap2State,
+} from "@/lib/swap2";
 import { protocolMeta } from "@/lib/models";
 import {
   getModelsServerSnapshot,
@@ -25,11 +39,18 @@ import {
 
 type Phase = "setup" | "playing";
 
+/** 开局规则：Swap2（标准竞技开局）或自由开局（黑先） */
+type Rule = "swap2" | "free";
+
+/** Swap2 模式下人类的角色：开局摆子方 / 应对方（三选一定色） */
+type Role = "maker" | "responder";
+
 /** 落子接口的流式事件（NDJSON，一行一个） */
 type StreamEvent =
   | { type: "thinking"; delta: string }
   | { type: "notice"; text: string }
   | { type: "move"; move: { row: number; col: number }; speech?: string }
+  | { type: "swap"; choice: Swap2Choice; speech?: string }
   | { type: "error"; error: string };
 
 /** 五连制胜标记：五枚黑子 + 琥珀胜连线，横幅里的图形焦点 */
@@ -75,6 +96,9 @@ export default function GomokuPage() {
   );
   const [modelId, setModelId] = useState("");
   const [humanColor, setHumanColor] = useState<Stone>("black");
+  const [rule, setRule] = useState<Rule>("swap2");
+  const [role, setRole] = useState<Role>("responder");
+  const [swap2, setSwap2] = useState<Swap2State | null>(null);
   const [effort, setEffort] = useState("");
   const [thinkingOn, setThinkingOn] = useState(true);
   const [speechOn, setSpeechOn] = useState(true);
@@ -86,9 +110,9 @@ export default function GomokuPage() {
   const [aiError, setAiError] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
 
-  // gameToken：重开/悔棋后让在途请求的回调失效；requestedAt：防止同一回合重复请求
+  // gameToken：重开/悔棋后让在途请求的回调失效；requestedAt：防止同一局面重复请求（阶段:手数:执色）
   const gameToken = useRef(0);
-  const requestedAt = useRef(-1);
+  const requestedAt = useRef("");
   const logRef = useRef<HTMLDivElement | null>(null);
   // 思维链流式展示：贴底自动滚动（用户手动上翻后暂停，翻回底部恢复）
   const thinkRef = useRef<HTMLDivElement | null>(null);
@@ -135,13 +159,8 @@ export default function GomokuPage() {
   // 派生值：默认选中第一个模型；推理档位不在该模型配置内时回落第一档
   const effectiveModelId = modelId || models[0]?.id || "";
   const selectedModel = models.find((m) => m.id === effectiveModelId) ?? null;
-  const aiColor: Stone = humanColor === "black" ? "white" : "black";
   const turn: Stone = moves.length % 2 === 0 ? "black" : "white";
   const draw = moves.length >= BOARD_SIZE * BOARD_SIZE;
-  // 本局是否让 AI 思考：模型支持推理 && 对局页开关打开
-  const aiThinking = selectedModel?.thinkingEnabled === true && thinkingOn;
-  const effortLevels = selectedModel?.thinkingEnabled ? selectedModel.effortLevels : [];
-  const effectiveEffort = effortLevels.includes(effort) ? effort : (effortLevels[0] ?? "");
 
   // 从最后一手派生胜负（moves 只追加/重置，无需额外状态）
   const win = useMemo<WinInfo | null>(() => {
@@ -151,7 +170,39 @@ export default function GomokuPage() {
   }, [moves]);
 
   const ended = win !== null || draw;
-  const humanTurn = phase === "playing" && !ended && turn === humanColor;
+
+  // Swap2 派生：席位 a = 开局摆子方，b = 应对方；协议结束后按定色映射颜色
+  const humanSeat: Seat = role === "maker" ? "a" : "b";
+  const aiSeat = otherSeat(humanSeat);
+  const pending = swap2 ? swap2Pending(swap2, moves.length) : null;
+  const resolved = swap2 !== null && isSwap2Resolved(swap2);
+  const humanStone: Stone = !swap2
+    ? humanColor
+    : swap2BlackSeat(swap2) === humanSeat
+      ? "black"
+      : "white";
+  const aiStone: Stone = humanStone === "black" ? "white" : "black";
+  // 人类当前要做的事：开局摆子 / 开局抉择 / 正常落子
+  const humanToPlace =
+    phase === "playing" &&
+    !ended &&
+    (pending
+      ? pending.act === "place" && pending.seat === humanSeat
+      : turn === humanStone);
+  const humanToChoose = pending !== null && pending.act === "choose" && pending.seat === humanSeat;
+  // AI 当前要做的事：swap2 阶段名仅用于请求体（undefined = 传统自由开局，不带该字段）
+  const aiStage: "place3" | "place2" | "choose1" | "choose2" | "done" | undefined = (() => {
+    if (pending) return pending.seat === aiSeat ? swap2StageOf(pending, moves.length) : undefined;
+    if (!swap2) return undefined;
+    return "done";
+  })();
+  const aiToAct =
+    phase === "playing" && !ended && (pending ? pending.seat === aiSeat : turn === aiStone);
+
+  // 本局是否让 AI 思考：模型支持推理 && 对局页开关打开
+  const aiThinking = selectedModel?.thinkingEnabled === true && thinkingOn;
+  const effortLevels = selectedModel?.thinkingEnabled ? selectedModel.effortLevels : [];
+  const effectiveEffort = effortLevels.includes(effort) ? effort : (effortLevels[0] ?? "");
 
   // 记录滚到最新一手；思维链贴底跟随
   useEffect(() => {
@@ -164,9 +215,10 @@ export default function GomokuPage() {
 
   const resetGame = () => {
     gameToken.current++;
-    requestedAt.current = -1;
+    requestedAt.current = "";
     stickBottom.current = true;
     setMoves([]);
+    setSwap2(rule === "swap2" ? SWAP2_INITIAL : null);
     resetThink();
     setAiSpeech("");
     setAiError("");
@@ -180,16 +232,34 @@ export default function GomokuPage() {
   };
 
   const handleCellClick = (row: number, col: number) => {
-    if (!humanTurn || aiBusy) return;
+    if (!humanToPlace || aiBusy) return;
     if (applyMoves(moves)[row][col]) return;
-    setMoves((prev) => [...prev, { row, col, stone: humanColor }]);
+    // Swap2 开局摆子会代摆黑白两色，棋子颜色恒按手数奇偶
+    setMoves((prev) => [
+      ...prev,
+      { row, col, stone: prev.length % 2 === 0 ? "black" : "white" },
+    ]);
   };
 
-  const canUndo = phase === "playing" && !ended && !aiBusy && turn === humanColor && moves.length >= 2;
+  /** Swap2 抉择（人类是抉择方时由右侧面板触发） */
+  const humanChoose = (choice: Swap2Choice) => {
+    if (!humanToChoose || !swap2) return;
+    setSwap2(applySwap2Choice(swap2, choice));
+  };
+
+  // 悔棋只回退两手且不越过 Swap2 开局子；开局协议进行中不支持悔棋
+  const canUndo =
+    phase === "playing" &&
+    !ended &&
+    !aiBusy &&
+    humanToPlace &&
+    (swap2
+      ? resolved && moves.length >= swap2OpeningLen(swap2) + 2
+      : moves.length >= 2);
   const undo = () => {
     if (!canUndo) return;
     gameToken.current++;
-    requestedAt.current = -1;
+    requestedAt.current = "";
     stickBottom.current = true;
     setMoves((prev) => prev.slice(0, Math.max(0, prev.length - 2)));
     resetThink();
@@ -198,17 +268,18 @@ export default function GomokuPage() {
   };
 
   const retryAiMove = () => {
-    requestedAt.current = -1;
+    requestedAt.current = "";
     stickBottom.current = true;
     setAiError("");
     setRetryNonce((n) => n + 1);
   };
 
-  // AI 回合：流式请求落子（思维链边到边显；requestedAt 防止同一局面重复请求）
+  // AI 回合：流式请求落子/抉择（思维链边到边显；requestedAt 防止同一局面重复请求）
   useEffect(() => {
-    if (phase !== "playing" || ended || turn !== aiColor || !effectiveModelId) return;
-    if (requestedAt.current === moves.length) return;
-    requestedAt.current = moves.length;
+    if (!aiToAct || !effectiveModelId) return;
+    const key = `${aiStage ?? "-"}:${moves.length}:${aiStone}`;
+    if (requestedAt.current === key) return;
+    requestedAt.current = key;
     const token = gameToken.current;
     setAiBusy(true);
     setAiError("");
@@ -218,8 +289,16 @@ export default function GomokuPage() {
     // 展示总量超限时整轮裁掉最老的，但保底最近 THINK_MIN_ROUNDS 轮完整思考
     const rounds = thinkRounds.current;
     const ply = moves.length + 1;
+    const roundLabel =
+      aiStage === "choose1" || aiStage === "choose2"
+        ? "── SWAP2 抉择 ──"
+        : aiStage === "place3"
+          ? `── 开局摆子 · 第 ${ply} 手 ──`
+          : aiStage === "place2"
+            ? `── 加摆两子 · 第 ${ply} 手 ──`
+            : `── 第 ${ply} 手 ──`;
     if (rounds.length > 0 && rounds[rounds.length - 1].ply === ply) rounds.pop();
-    rounds.push({ ply, label: `── 第 ${ply} 手 ──`, text: "" });
+    rounds.push({ ply, label: roundLabel, text: "" });
     let keep = rounds.reduce((sum, r) => sum + r.text.length, 0);
     while (rounds.length - 1 > THINK_MIN_ROUNDS && keep > THINK_KEEP_CHARS) {
       keep -= rounds[0].text.length;
@@ -234,10 +313,11 @@ export default function GomokuPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             modelId: effectiveModelId,
-            aiColor,
+            aiColor: aiStone,
             effort: effectiveEffort || undefined,
             thinking: aiThinking,
             speech: speechOn,
+            swap2: aiStage,
             moves: moves.map(({ row, col }) => ({ row, col })),
           }),
         });
@@ -254,6 +334,7 @@ export default function GomokuPage() {
         const dec = new TextDecoder();
         let buf = "";
         let move: { row: number; col: number } | null = null;
+        let choice: Swap2Choice | null = null;
         let speechText = "";
         let errMsg = "";
         const handleEvent = (ev: StreamEvent) => {
@@ -263,6 +344,9 @@ export default function GomokuPage() {
           else if (ev.type === "notice") appendThink(`\n\n—— ${ev.text} ——\n`);
           else if (ev.type === "move") {
             move = ev.move;
+            speechText = ev.speech ?? "";
+          } else if (ev.type === "swap") {
+            choice = ev.choice;
             speechText = ev.speech ?? "";
           } else if (ev.type === "error") errMsg = ev.error;
         };
@@ -293,13 +377,21 @@ export default function GomokuPage() {
           setAiError(errMsg);
           return;
         }
+        if (choice) {
+          setAiSpeech(speechText);
+          setSwap2((prev) => (prev ? applySwap2Choice(prev, choice!) : prev));
+          return;
+        }
         if (!move) {
           setAiError("连接中断，请重试");
           return;
         }
         const { row, col } = move;
         setAiSpeech(speechText);
-        setMoves((prev) => [...prev, { row, col, stone: aiColor }]);
+        setMoves((prev) => [
+          ...prev,
+          { row, col, stone: prev.length % 2 === 0 ? "black" : "white" },
+        ]);
       } catch {
         if (gameToken.current === token) {
           setAiBusy(false);
@@ -307,31 +399,67 @@ export default function GomokuPage() {
         }
       }
     })();
-  }, [phase, ended, turn, aiColor, effectiveModelId, moves, effectiveEffort, aiThinking, speechOn, retryNonce, appendThink, scheduleThinkFlush]);
+  }, [aiToAct, aiStage, aiStone, phase, ended, turn, effectiveModelId, moves, effectiveEffort, aiThinking, speechOn, retryNonce, appendThink, scheduleThinkFlush]);
 
   const status = (() => {
     if (!isModelsLoaded()) return { title: "加载模型列表中…", sub: "" };
     if (phase === "setup") {
       return models.length === 0
         ? { title: "还没有对手", sub: "先去模型配置页请一位选手上场" }
-        : { title: "准备开局", sub: "选好对手和棋子颜色，按「开始对局」" };
+        : { title: "准备开局", sub: "选好规则、对手和角色，按「开始对局」" };
     }
     if (!selectedModel) return { title: "对手不见了", sub: "模型配置被删除，请回设置重选" };
     if (win)
-      return win.stone === humanColor
+      return win.stone === humanStone
         ? { title: "五连达成，你赢了！", sub: "漂亮的胜利" }
         : { title: "你输了…", sub: `${selectedModel.name} 先连成了五子` };
     if (draw) return { title: "平局", sub: "棋盘上已经没有空位了" };
+    // Swap2 开局阶段
+    if (pending) {
+      const humanActs = pending.seat === humanSeat;
+      if (pending.act === "place") {
+        const which =
+          pending.seat === "a" ? `开局第 ${moves.length + 1}/3 手` : `加摆第 ${moves.length - 2}/2 手`;
+        return humanActs
+          ? {
+              title: `轮到你了：摆${which}`,
+              sub: `这一手是${turn === "black" ? "黑" : "白"}子，Swap2 开局阶段`,
+            }
+          : { title: `${selectedModel.name} 正在摆${which}`, sub: "思维链会在右侧同步展示" };
+      }
+      const first = moves.length === 3;
+      return humanActs
+        ? {
+            title: first ? "Swap2：由你定夺" : "Swap2：选出你的颜色",
+            sub: first ? "右侧面板三选一：执白 / 换执黑 / 加摆两子" : "右侧面板二选一，定色后执白一方落子",
+          }
+        : {
+            title: `${selectedModel.name} 正在抉择`,
+            sub: first ? "执白 / 换执黑 / 加摆两子" : "执黑 / 执白",
+          };
+    }
+    // Swap2 刚定色：顺手说明归属
+    if (swap2 && resolved && moves.length === swap2OpeningLen(swap2)) {
+      return {
+        title: `定色完成：你执${humanStone === "black" ? "黑" : "白"}`,
+        sub: `对手执${aiStone === "black" ? "黑" : "白"}，白方先行`,
+      };
+    }
     // 轮到 AI 但请求还没发出（同一帧）也按思考中显示，避免状态行高度跳变带得棋盘缩放
-    if (aiBusy || (turn === aiColor && !aiError))
-      return { title: `${selectedModel.name} 正在思考`, sub: "思维链会在右侧同步展示" };
-    if (turn === humanColor)
+    if (aiBusy || aiToAct) return { title: `${selectedModel.name} 正在思考`, sub: "思维链会在右侧同步展示" };
+    if (humanToPlace)
       return {
         title: "轮到你了",
-        sub: `你执${humanColor === "black" ? "黑（先行）" : "白（后行）"}，点击棋盘落子`,
+        sub: `你执${humanStone === "black" ? "黑" : "白"}，点击棋盘落子`,
       };
     return { title: "等待中", sub: "" };
   })();
+
+  // 落子归属：Swap2 的开局子按席位归属，其余按棋色归属
+  const moverName = (i: number, stone: Stone) =>
+    (swap2 ? seatOfSwap2Move(swap2, i) === humanSeat : stone === humanColor)
+      ? "你"
+      : (selectedModel?.name ?? "");
 
   return (
     <div className="flex min-h-screen flex-col lg:h-screen">
@@ -368,8 +496,8 @@ export default function GomokuPage() {
                 <GomokuBoard
                   moves={moves}
                   winInfo={win}
-                  interactive={humanTurn && !aiBusy}
-                  previewStone={humanTurn ? humanColor : null}
+                  interactive={humanToPlace && !aiBusy}
+                  previewStone={humanToPlace ? turn : null}
                   onCellClick={handleCellClick}
                 />
 
@@ -384,7 +512,7 @@ export default function GomokuPage() {
                           咚咚咚…！
                         </p>
                         <h2 className="mt-2 text-3xl font-black text-[#141414]">
-                          {win ? (win.stone === humanColor ? "你赢了！" : "你输了…") : "平局"}
+                          {win ? (win.stone === humanStone ? "你赢了！" : "你输了…") : "平局"}
                         </h2>
                         <p className="mt-1 text-xs text-neutral-600">{status.sub}</p>
                         <button
@@ -483,26 +611,83 @@ export default function GomokuPage() {
                       </div>
 
                       <div>
-                        <p className="text-xs font-bold text-neutral-600">你的棋子</p>
+                        <p className="text-xs font-bold text-neutral-600">开局规则</p>
                         <div className="mt-1 grid grid-cols-2 gap-2">
-                          {(["black", "white"] as const).map((color) => {
-                            const active = humanColor === color;
+                          {([
+                            { id: "swap2", label: "⚖️ Swap2 开局" },
+                            { id: "free", label: "🎲 自由开局" },
+                          ] as const).map(({ id, label }) => {
+                            const active = rule === id;
                             return (
                               <button
-                                key={color}
+                                key={id}
                                 type="button"
                                 aria-pressed={active}
-                                onClick={() => setHumanColor(color)}
+                                onClick={() => setRule(id)}
                                 className={`rounded-lg border-[3px] border-[#141414] px-3 py-2 text-sm font-bold shadow-[3px_3px_0_#141414] transition-transform hover:-translate-y-0.5 ${
                                   active ? "bg-amber-400" : "bg-white"
                                 }`}
                               >
-                                {color === "black" ? "● 黑棋 · 先行" : "○ 白棋 · 后行"}
+                                {label}
                               </button>
                             );
                           })}
                         </div>
+                        {rule === "swap2" && (
+                          <p className="mt-1.5 text-[10px] leading-relaxed text-neutral-500">
+                            Swap2：开局方摆前三子（黑·白·黑），应对方执白 / 换黑 / 加摆两子定色，白方行下一手
+                          </p>
+                        )}
                       </div>
+
+                      {rule === "swap2" ? (
+                        <div>
+                          <p className="text-xs font-bold text-neutral-600">你的角色</p>
+                          <div className="mt-1 grid grid-cols-2 gap-2">
+                            {([
+                              { id: "maker", label: "🎭 开局方 · 摆前三子" },
+                              { id: "responder", label: "🤔 应对方 · 三选一" },
+                            ] as const).map(({ id, label }) => {
+                              const active = role === id;
+                              return (
+                                <button
+                                  key={id}
+                                  type="button"
+                                  aria-pressed={active}
+                                  onClick={() => setRole(id)}
+                                  className={`rounded-lg border-[3px] border-[#141414] px-3 py-2 text-sm font-bold shadow-[3px_3px_0_#141414] transition-transform hover:-translate-y-0.5 ${
+                                    active ? "bg-amber-400" : "bg-white"
+                                  }`}
+                                >
+                                  {label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          <p className="text-xs font-bold text-neutral-600">你的棋子</p>
+                          <div className="mt-1 grid grid-cols-2 gap-2">
+                            {(["black", "white"] as const).map((color) => {
+                              const active = humanColor === color;
+                              return (
+                                <button
+                                  key={color}
+                                  type="button"
+                                  aria-pressed={active}
+                                  onClick={() => setHumanColor(color)}
+                                  className={`rounded-lg border-[3px] border-[#141414] px-3 py-2 text-sm font-bold shadow-[3px_3px_0_#141414] transition-transform hover:-translate-y-0.5 ${
+                                    active ? "bg-amber-400" : "bg-white"
+                                  }`}
+                                >
+                                  {color === "black" ? "● 黑棋 · 先行" : "○ 白棋 · 后行"}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
 
                       {selectedModel?.thinkingEnabled && (
                         <div>
@@ -587,15 +772,78 @@ export default function GomokuPage() {
                 </div>
               ) : (
                 <div className="mt-3 space-y-3 text-sm">
+                  {/* Swap2 抉择：轮到人类定色时给出选项，定色后白方行下一手 */}
+                  {humanToChoose && (
+                    <div className="rounded-[10px] border-[3px] border-[#C0392B] bg-white p-3 shadow-[3px_3px_0_rgba(0,0,0,0.25)]">
+                      <p className="text-[10px] font-black tracking-[0.3em] text-[#C0392B]">
+                        SWAP2 抉择
+                      </p>
+                      <p className="mt-1 text-xs font-medium text-neutral-600">
+                        {moves.length === 3
+                          ? "对手摆好了前三子，由你定夺"
+                          : "对手加摆了两子，选出你的颜色"}
+                      </p>
+                      <div
+                        className={`mt-2 grid gap-2 ${moves.length === 3 ? "grid-cols-3" : "grid-cols-2"}`}
+                      >
+                        {moves.length === 3 && (
+                          <button
+                            type="button"
+                            onClick={() => humanChoose("place2")}
+                            className="rounded-lg border-[3px] border-[#141414] bg-white px-2 py-2 text-xs font-bold shadow-[3px_3px_0_#141414] transition-transform hover:-translate-y-0.5"
+                          >
+                            ＋ 加摆两子
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => humanChoose("black")}
+                          className="rounded-lg border-[3px] border-[#141414] bg-amber-400 px-2 py-2 text-xs font-bold shadow-[3px_3px_0_#141414] transition-transform hover:-translate-y-0.5"
+                        >
+                          ● {moves.length === 3 ? "换执黑" : "执黑"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => humanChoose("white")}
+                          className="rounded-lg border-[3px] border-[#141414] bg-white px-2 py-2 text-xs font-bold shadow-[3px_3px_0_#141414] transition-transform hover:-translate-y-0.5"
+                        >
+                          ○ 执白
+                        </button>
+                      </div>
+                      <p className="mt-1.5 text-[10px] text-neutral-500">
+                        定色后由执白一方落下一手
+                      </p>
+                    </div>
+                  )}
                   <dl className="space-y-1.5">
-                    <div className="flex justify-between gap-2">
-                      <dt className="text-neutral-600">你执</dt>
-                      <dd className="font-bold">{humanColor === "black" ? "● 黑（先行）" : "○ 白（后行）"}</dd>
-                    </div>
-                    <div className="flex justify-between gap-2">
-                      <dt className="text-neutral-600">AI 执</dt>
-                      <dd className="font-bold">{aiColor === "black" ? "● 黑" : "○ 白"}</dd>
-                    </div>
+                    {swap2 && !resolved ? (
+                      <>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-neutral-600">你的角色</dt>
+                          <dd className="font-bold">
+                            {role === "maker" ? "🎭 开局方" : "🤔 应对方"}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-neutral-600">规则</dt>
+                          <dd className="font-bold">Swap2 · 定色后揭晓棋色</dd>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-neutral-600">你执</dt>
+                          <dd className="font-bold">
+                            {humanStone === "black" ? "● 黑" : "○ 白"}
+                            {swap2 ? "（Swap2 定色）" : humanColor === "black" ? "（先行）" : "（后行）"}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-neutral-600">AI 执</dt>
+                          <dd className="font-bold">{aiStone === "black" ? "● 黑" : "○ 白"}</dd>
+                        </div>
+                      </>
+                    )}
                     <div className="flex justify-between gap-2">
                       <dt className="text-neutral-600">思考</dt>
                       <dd className="font-mono text-xs font-bold">
@@ -700,7 +948,7 @@ export default function GomokuPage() {
                         <span aria-hidden>{m.stone === "black" ? "●" : "○"}</span>
                         <span className="font-mono text-xs font-bold">{cellName(m.row, m.col)}</span>
                         <span className="ml-auto text-[10px] text-neutral-500">
-                          {m.stone === humanColor ? "你" : selectedModel?.name}
+                          {moverName(i, m.stone)}
                         </span>
                       </div>
                     ))

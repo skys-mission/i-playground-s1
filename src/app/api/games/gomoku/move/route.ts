@@ -9,6 +9,7 @@ import {
   cellName,
   movesToText,
   parseAiMove,
+  parseSwapChoice,
   type Board,
   type Move,
   type Stone,
@@ -320,6 +321,21 @@ function estimateTokens(text: string): number {
  *  只传台词不传思维链——思考过程是各选手私有的 */
 type Opponent = { name: string; lines: string[] };
 
+/** 落子后附一句台词的输出要求（对手在场时鼓励互动） */
+function saySpecFor(opponent: Opponent | null): string {
+  return opponent
+    ? "第二行只写「SAY 一句话」——以你的口吻说一句不超过 20 字的中文对局感言（像漫画角色台词，有气势，可以回应或挑衅对方），不要透露具体战术。"
+    : "第二行只写「SAY 一句话」——以你的口吻说一句不超过 20 字的中文对局感言（像漫画角色台词，有气势），不要透露具体战术。";
+}
+
+/** 对手最近台词的展示块（无台词时为空串） */
+function opponentNoteFor(opponent: Opponent | null): string {
+  return opponent && opponent.lines.length > 0
+    ? `对手「${opponent.name}」最近说过（从早到晚）：
+${opponent.lines.map((l) => `「${l}」`).join("\n")}\n\n`
+    : "";
+}
+
 function buildPrompt(
   board: Board,
   moves: Move[],
@@ -328,15 +344,13 @@ function buildPrompt(
   historyNote: string | null = null,
   speech = false,
   opponent: Opponent | null = null,
+  swap2Note = false,
 ): { system: string; user: string } {
   const side = aiColor === "black" ? "黑棋（X）" : "白棋（O）";
-  const saySpec = opponent
-    ? "第二行只写「SAY 一句话」——以你的口吻说一句不超过 20 字的中文对局感言（像漫画角色台词，有气势，可以回应或挑衅对方），不要透露具体战术。"
-    : "第二行只写「SAY 一句话」——以你的口吻说一句不超过 20 字的中文对局感言（像漫画角色台词，有气势），不要透露具体战术。";
   const formatSpec = speech
     ? `输出格式（严格遵守）：
 第一行只写「MOVE 列字母行号」，例如「MOVE H8」。
-${saySpec}`
+${saySpecFor(opponent)}`
     : `输出格式（严格遵守）：只输出一行「MOVE 列字母行号」，例如「MOVE H8」。`;
   const system = `${opponent
     ? `你正在与另一位 AI 选手「${opponent.name}」进行五子棋（Gomoku）对弈，人类用户正在旁观这场对决。`
@@ -345,36 +359,140 @@ ${saySpec}`
 规则：
 - 棋盘 15×15，列用字母 A-O 标记，行用数字 1-15 标记，如 H8 表示 H 列第 8 行。
 - 黑棋先行，双方轮流在空交叉点落子。
-- 横、竖、斜任意方向先连成五子（或以上）者获胜。
+- 横、竖、斜任意方向先连成五子（或以上）者获胜。${swap2Note ? `
+- 本局以 Swap2 开局定色：棋盘上的开局子由双方按规则摆定，直接按当前局面行棋即可。` : ""}
 
 你执${side}，现在轮到你落子。
 
 思考要求：思考要简短，依次检查三件事即可——对方下一手能否连五（能则必须堵）；自己这一手能否直接连五获胜；都不行就下在能形成自己连子或压制对方连子的交叉点。禁止穷举棋盘、禁止罗列所有方向。
 
 ${formatSpec}只能选择空交叉点。不要输出解释或其他内容。`;
-  const opponentNote =
-    opponent && opponent.lines.length > 0
-      ? `对手「${opponent.name}」最近说过（从早到晚）：
-${opponent.lines.map((l) => `「${l}」`).join("\n")}\n\n`
-      : "";
   const user = `当前棋盘（X=黑棋，O=白棋，.=空位）：
 ${boardToText(board)}
 
-${historyNote ? `${historyNote}\n` : ""}${opponentNote}落子历史：
+${historyNote ? `${historyNote}\n` : ""}${opponentNoteFor(opponent)}落子历史：
 ${movesToText(moves)}
 
 ${mistake ?? "请给出你的下一步落子。"}`;
   return { system, user };
 }
 
+/** Swap2 开局规则的固定说明（摆子/抉择提示词共用） */
+const SWAP2_RULE_TEXT =
+  "Swap2 开局：开局方先代双方摆前三子（第1手黑、第2手白、第3手黑）；随后应对方三选一——执白、换执黑、或加摆两子（第4手白、第5手黑）交给开局方定色；定色后由执白一方落下一手，此后正常对弈。";
+
+/** Swap2 摆子阶段的提示词：who = 开局方摆前三子 / 应对方加摆两子 */
+function buildSwap2PlacePrompt(
+  board: Board,
+  moves: Move[],
+  who: "maker" | "responder",
+  speech: boolean,
+  opponent: Opponent | null,
+  mistake: string | null,
+): { system: string; user: string } {
+  const idx = moves.length;
+  const stoneZh = idx % 2 === 0 ? "黑X" : "白O";
+  const roleText =
+    who === "maker"
+      ? `你是开局摆子方，正在摆前三子中的第 ${idx + 1} 手（${stoneZh}）。摆子目标：三子彼此有关联、攻守兼顾——黑优太明显会被对方换执黑，白亏太明显则自己吃亏，争取摆成双方都能接受的均衡局面。`
+      : `你是应对方，已选择「加摆两子」：由你再摆第 4 手（白O）与第 5 手（黑X）。摆子目标：把局面修饰成让开局方无论执黑执白都不舒服，从而对你有利。现在摆第 ${idx + 1} 手（${stoneZh}）。`;
+  const formatSpec = speech
+    ? `输出格式（严格遵守）：
+第一行只写「MOVE 列字母行号」，例如「MOVE H8」。
+${saySpecFor(opponent)}`
+    : `输出格式（严格遵守）：只输出一行「MOVE 列字母行号」，例如「MOVE H8」。`;
+  const system = `${opponent
+    ? `你正在与另一位 AI 选手「${opponent.name}」进行五子棋（Gomoku）对弈，人类用户正在旁观这场对决。`
+    : "你正在与人类进行五子棋（Gomoku）对弈。"}
+
+规则：
+- 棋盘 15×15，列用字母 A-O 标记，行用数字 1-15 标记，如 H8 表示 H 列第 8 行。
+- ${SWAP2_RULE_TEXT}
+
+${roleText}
+
+思考要求：思考要简短，选一个有棋理的交叉点即可，禁止穷举棋盘。
+
+${formatSpec}只能选择空交叉点。不要输出解释或其他内容。`;
+  const user = `当前棋盘（X=黑棋，O=白棋，.=空位）：
+${boardToText(board)}
+
+${opponentNoteFor(opponent)}开局摆子记录：
+${movesToText(moves)}
+
+${mistake ?? "请摆出这一手。"}`;
+  return { system, user };
+}
+
+/** Swap2 抉择阶段的提示词：choose1 = 前三子后的三选一，choose2 = 加摆后的二选一 */
+function buildSwap2ChoicePrompt(
+  board: Board,
+  moves: Move[],
+  mode: "choose1" | "choose2",
+  speech: boolean,
+  opponent: Opponent | null,
+  mistake: string | null,
+): { system: string; user: string } {
+  const who = mode === "choose1" ? "应对方" : "开局摆子方";
+  const options =
+    mode === "choose1"
+      ? `- SWAP WHITE：你执白，对方执黑；定色后轮到你落第 4 手（白）。
+- SWAP BLACK：你换执黑，对方执白；定色后对方落第 4 手（白）。
+- SWAP PLACE2：你再摆两子（第 4 手白、第 5 手黑），随后对方必须定色。`
+      : `- SWAP WHITE：你执白，对方执黑；定色后轮到你落第 6 手（白）。
+- SWAP BLACK：你执黑，对方执白；定色后对方落第 6 手（白）。`;
+  const hint =
+    mode === "choose1"
+      ? "判断提示：黑优明显就换执黑，白优明显就执白，局面均衡且想掌握主动时可加摆两子把难题交给对方。"
+      : "判断提示：以你的棋风评估当前局面，选出后续更愿意执的一边。";
+  const only =
+    mode === "choose1"
+      ? "「SWAP WHITE」「SWAP BLACK」「SWAP PLACE2」三选一"
+      : "「SWAP WHITE」「SWAP BLACK」二选一";
+  const formatSpec = speech
+    ? `输出格式（严格遵守）：
+第一行只写 ${only}。
+${saySpecFor(opponent)}`
+    : `输出格式（严格遵守）：只输出一行，${only}。`;
+  const system = `${opponent
+    ? `你正在与另一位 AI 选手「${opponent.name}」进行五子棋（Gomoku）对弈，人类用户正在旁观这场对决。`
+    : "你正在与人类进行五子棋（Gomoku）对弈。"}
+
+规则：
+- 棋盘 15×15，列用字母 A-O 标记，行用数字 1-15 标记，如 H8 表示 H 列第 8 行。
+- ${SWAP2_RULE_TEXT}
+
+你是${who}，开局子已在棋盘上，现在由你定夺。
+
+${options}
+
+${hint}
+
+${formatSpec}不要输出解释或其他内容。`;
+  const user = `当前棋盘（X=黑棋，O=白棋，.=空位）：
+${boardToText(board)}
+
+${opponentNoteFor(opponent)}开局摆子记录：
+${movesToText(moves)}
+
+${mistake ?? "请给出你的抉择。"}`;
+  return { system, user };
+}
+
 /** 服务端代理 AI 落子（密钥不出服务端）。请求体：
  *  modelId / aiColor / moves / effort / thinking / speech，
+ *  可选 swap2（Swap2 开局阶段：place3 / place2 / choose1 / choose2 / done，
+ *  done 表示定色后的正常行棋，提示词会带开局说明），
  *  可选 opponentName + opponentSpeech[]（AI 对 AI：对手名字与其最近台词，
  *  只喂台词不喂思维链）。流式 NDJSON 事件：
  *  {"type":"thinking","delta"} 思维链增量
  *  {"type":"notice","text"}    重试反馈说明
  *  {"type":"move","move","label"} 合法落子（终态）
+ *  {"type":"swap","choice"}    Swap2 抉择 black/white/place2（终态）
  *  {"type":"error","error"}    失败（终态） */
+const SWAP2_STAGES = ["place3", "place2", "choose1", "choose2", "done"] as const;
+type Swap2Stage = (typeof SWAP2_STAGES)[number];
+
 export async function POST(req: NextRequest) {
   let body: unknown;
   try {
@@ -390,6 +508,12 @@ export async function POST(req: NextRequest) {
   const thinking = r?.thinking !== false;
   // 对局说话开关：开启时模型落子后附一句台词（缺省关）
   const speech = r?.speech === true;
+  // Swap2 开局阶段（缺省 = 传统自由开局）
+  const swap2Raw = r?.swap2;
+  const swap2: Swap2Stage | undefined =
+    typeof swap2Raw === "string" && (SWAP2_STAGES as readonly string[]).includes(swap2Raw)
+      ? (swap2Raw as Swap2Stage)
+      : undefined;
   // AI 对 AI 模式：对手名字与其最近几句公开台词（长度硬限制，防注入超长内容）
   const opponentName = str(r?.opponentName).slice(0, 40);
   const opponent: Opponent | null = opponentName
@@ -428,8 +552,23 @@ export async function POST(req: NextRequest) {
     moves.push({ row, col, stone });
   }
 
+  // Swap2 阶段与棋谱手数必须吻合
+  if (swap2 === "place3" && moves.length > 2) {
+    return NextResponse.json({ error: "开局摆子阶段棋谱不应超过 3 手" }, { status: 400 });
+  }
+  if (swap2 === "place2" && (moves.length < 3 || moves.length > 4)) {
+    return NextResponse.json({ error: "加摆两子阶段棋谱应为 3~4 手" }, { status: 400 });
+  }
+  if (swap2 === "choose1" && moves.length !== 3) {
+    return NextResponse.json({ error: "Swap2 抉择应在前三子摆好后进行" }, { status: 400 });
+  }
+  if (swap2 === "choose2" && moves.length !== 5) {
+    return NextResponse.json({ error: "Swap2 定色应在五子摆好后进行" }, { status: 400 });
+  }
+
   const turn: Stone = moves.length % 2 === 0 ? "black" : "white";
-  if (turn !== aiColor) {
+  // Swap2 开局/抉择阶段由阶段本身决定行动方，不走「轮到谁」的奇偶校验
+  if ((!swap2 || swap2 === "done") && turn !== aiColor) {
     return NextResponse.json({ error: "现在还没轮到 AI 落子" }, { status: 400 });
   }
 
@@ -456,18 +595,21 @@ export async function POST(req: NextRequest) {
         }
       };
       try {
+        const wantChoice = swap2 === "choose1" || swap2 === "choose2";
+        const wantPlace = swap2 === "place3" || swap2 === "place2";
         // 输入上下文上限：超限时自动压缩。棋盘快照本身是完整局面，
-        // 落子历史只是辅助阅读，从最早一手开始省略是安全的
+        // 落子历史只是辅助阅读，从最早一手开始省略是安全的。
+        // Swap2 开局的摆子/抉择提示词很短，不需要压缩。
         const contextLimit = model.contextLimit;
         let promptMoves = moves;
         let historyNote: string | null = null;
-        if (contextLimit > 0) {
-          const full = buildPrompt(board, moves, aiColor, null, null, speech, opponent);
+        if (!wantChoice && !wantPlace && contextLimit > 0) {
+          const full = buildPrompt(board, moves, aiColor, null, null, speech, opponent, swap2 === "done");
           const fullEstimate = estimateTokens(full.system + full.user);
           if (fullEstimate > contextLimit) {
             let keep = moves.length;
             while (keep > 0) {
-              const probe = buildPrompt(board, moves.slice(moves.length - keep), aiColor, null, null, speech, opponent);
+              const probe = buildPrompt(board, moves.slice(moves.length - keep), aiColor, null, null, speech, opponent, swap2 === "done");
               if (estimateTokens(probe.system + probe.user) <= contextLimit) break;
               keep -= 4;
             }
@@ -481,9 +623,16 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        const build = (mistake: string | null): { system: string; user: string } =>
+          wantChoice
+            ? buildSwap2ChoicePrompt(board, moves, swap2!, speech, opponent, mistake)
+            : wantPlace
+              ? buildSwap2PlacePrompt(board, moves, swap2 === "place3" ? "maker" : "responder", speech, opponent, mistake)
+              : buildPrompt(board, promptMoves, aiColor, mistake, historyNote, speech, opponent, swap2 === "done");
+
         let mistake: string | null = null;
         for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-          const { system, user } = buildPrompt(board, promptMoves, aiColor, mistake, historyNote, speech, opponent);
+          const { system, user } = build(mistake);
           // 第二次尝试给 Messages 协议放大输出上限：应对思考失控截断
           const call = await callModel(model, system, user, {
             effort,
@@ -493,12 +642,29 @@ export async function POST(req: NextRequest) {
           if (!call.ok) {
             // 思考截断属于可纠正失败：带着「压缩思考」的反馈再试一次
             if (call.retryable && attempt < MAX_ATTEMPTS - 1) {
-              mistake = "你上一轮思考太长，回复被截断了。把思考压缩到五十字以内，直接给出落子。";
+              mistake = "你上一轮思考太长，回复被截断了。把思考压缩到五十字以内，直接给出答复。";
               send({ type: "notice", text: "思考过长被截断，已要求模型压缩思考后重试" });
               continue;
             }
             send({ type: "error", error: call.error });
             return;
+          }
+          // Swap2 抉择：解析 SWAP BLACK / SWAP WHITE / SWAP PLACE2
+          if (wantChoice) {
+            const choice = parseSwapChoice(call.content, swap2 === "choose1");
+            if (choice) {
+              const sayMatch = speech ? call.content.match(/^SAY\s*[:：]?\s*(.+)$/m) : null;
+              const speechText = sayMatch ? sayMatch[1].trim().slice(0, 60) : "";
+              send({ type: "swap", choice, speech: speechText });
+              return;
+            }
+            mistake = `你上一次的回复「${call.content.trim().slice(0, 200)}」没有给出合法抉择。只输出一行：${
+              swap2 === "choose1"
+                ? "SWAP WHITE / SWAP BLACK / SWAP PLACE2"
+                : "SWAP WHITE / SWAP BLACK"
+            }。`;
+            send({ type: "notice", text: "上一次回复不合法（没解析出抉择），已反馈模型重新抉择" });
+            continue;
           }
           const mv = parseAiMove(call.content);
           const invalid = !mv
@@ -523,7 +689,12 @@ export async function POST(req: NextRequest) {
           mistake = `你上一次的回复「${call.content.trim().slice(0, 200)}」不合法（${invalid}）。`;
           send({ type: "notice", text: `上一次回复不合法（${invalid}），已反馈模型重新落子` });
         }
-        send({ type: "error", error: "模型连续两次都没给出合法落子，可以重试或换个模型" });
+        send({
+          type: "error",
+          error: wantChoice
+            ? "模型连续两次都没给出合法抉择，可以重试或换个模型"
+            : "模型连续两次都没给出合法落子，可以重试或换个模型",
+        });
       } finally {
         try {
           controller.close();
