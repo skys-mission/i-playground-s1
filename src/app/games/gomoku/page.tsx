@@ -582,6 +582,15 @@ export default function GomokuPage() {
                       >
                         开始对局
                       </button>
+                      <p className="text-center text-xs text-neutral-500">
+                        想看 AI 互相过招？
+                        <Link
+                          href="/games/gomoku/arena"
+                          className="ml-1 font-bold text-[#B45309] underline underline-offset-2"
+                        >
+                          AI 对战 →
+                        </Link>
+                      </p>
                     </>
                   )}
                 </div>

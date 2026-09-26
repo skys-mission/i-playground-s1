@@ -299,6 +299,10 @@ function estimateTokens(text: string): number {
   return Math.ceil(cjk + other / 4);
 }
 
+/** 对手信息（AI 对 AI 模式）：名字 + 最近几句公开台词。
+ *  只传台词不传思维链——思考过程是各选手私有的 */
+type Opponent = { name: string; lines: string[] };
+
 function buildPrompt(
   board: Board,
   moves: Move[],
@@ -306,14 +310,20 @@ function buildPrompt(
   mistake: string | null,
   historyNote: string | null = null,
   speech = false,
+  opponent: Opponent | null = null,
 ): { system: string; user: string } {
   const side = aiColor === "black" ? "黑棋（X）" : "白棋（O）";
+  const saySpec = opponent
+    ? "第二行只写「SAY 一句话」——以你的口吻说一句不超过 20 字的中文对局感言（像漫画角色台词，有气势，可以回应或挑衅对方），不要透露具体战术。"
+    : "第二行只写「SAY 一句话」——以你的口吻说一句不超过 20 字的中文对局感言（像漫画角色台词，有气势），不要透露具体战术。";
   const formatSpec = speech
     ? `输出格式（严格遵守）：
 第一行只写「MOVE 列字母行号」，例如「MOVE H8」。
-第二行只写「SAY 一句话」——以你的口吻说一句不超过 20 字的中文对局感言（像漫画角色台词，有气势），不要透露具体战术。`
+${saySpec}`
     : `输出格式（严格遵守）：只输出一行「MOVE 列字母行号」，例如「MOVE H8」。`;
-  const system = `你正在与人类进行五子棋（Gomoku）对弈。
+  const system = `${opponent
+    ? `你正在与另一位 AI 选手「${opponent.name}」进行五子棋（Gomoku）对弈，人类用户正在旁观这场对决。`
+    : "你正在与人类进行五子棋（Gomoku）对弈。"}
 
 规则：
 - 棋盘 15×15，列用字母 A-O 标记，行用数字 1-15 标记，如 H8 表示 H 列第 8 行。
@@ -325,17 +335,25 @@ function buildPrompt(
 思考要求：思考要简短，依次检查三件事即可——对方下一手能否连五（能则必须堵）；自己这一手能否直接连五获胜；都不行就下在能形成自己连子或压制对方连子的交叉点。禁止穷举棋盘、禁止罗列所有方向。
 
 ${formatSpec}只能选择空交叉点。不要输出解释或其他内容。`;
+  const opponentNote =
+    opponent && opponent.lines.length > 0
+      ? `对手「${opponent.name}」最近说过（从早到晚）：
+${opponent.lines.map((l) => `「${l}」`).join("\n")}\n\n`
+      : "";
   const user = `当前棋盘（X=黑棋，O=白棋，.=空位）：
 ${boardToText(board)}
 
-${historyNote ? `${historyNote}\n` : ""}落子历史：
+${historyNote ? `${historyNote}\n` : ""}${opponentNote}落子历史：
 ${movesToText(moves)}
 
 ${mistake ?? "请给出你的下一步落子。"}`;
   return { system, user };
 }
 
-/** 服务端代理 AI 落子（密钥不出服务端）。流式 NDJSON 事件：
+/** 服务端代理 AI 落子（密钥不出服务端）。请求体：
+ *  modelId / aiColor / moves / effort / thinking / speech，
+ *  可选 opponentName + opponentSpeech[]（AI 对 AI：对手名字与其最近台词，
+ *  只喂台词不喂思维链）。流式 NDJSON 事件：
  *  {"type":"thinking","delta"} 思维链增量
  *  {"type":"notice","text"}    重试反馈说明
  *  {"type":"move","move","label"} 合法落子（终态）
@@ -355,6 +373,17 @@ export async function POST(req: NextRequest) {
   const thinking = r?.thinking !== false;
   // 对局说话开关：开启时模型落子后附一句台词（缺省关）
   const speech = r?.speech === true;
+  // AI 对 AI 模式：对手名字与其最近几句公开台词（长度硬限制，防注入超长内容）
+  const opponentName = str(r?.opponentName).slice(0, 40);
+  const opponent: Opponent | null = opponentName
+    ? {
+        name: opponentName,
+        lines: asArray(r?.opponentSpeech)
+          .slice(-3)
+          .map((v) => str(v).slice(0, 60))
+          .filter((s) => s.length > 0),
+      }
+    : null;
 
   if (!modelId) {
     return NextResponse.json({ error: "缺少模型 ID" }, { status: 400 });
@@ -416,12 +445,12 @@ export async function POST(req: NextRequest) {
         let promptMoves = moves;
         let historyNote: string | null = null;
         if (contextLimit > 0) {
-          const full = buildPrompt(board, moves, aiColor, null, null, speech);
+          const full = buildPrompt(board, moves, aiColor, null, null, speech, opponent);
           const fullEstimate = estimateTokens(full.system + full.user);
           if (fullEstimate > contextLimit) {
             let keep = moves.length;
             while (keep > 0) {
-              const probe = buildPrompt(board, moves.slice(moves.length - keep), aiColor, null, null, speech);
+              const probe = buildPrompt(board, moves.slice(moves.length - keep), aiColor, null, null, speech, opponent);
               if (estimateTokens(probe.system + probe.user) <= contextLimit) break;
               keep -= 4;
             }
@@ -437,7 +466,7 @@ export async function POST(req: NextRequest) {
 
         let mistake: string | null = null;
         for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-          const { system, user } = buildPrompt(board, promptMoves, aiColor, mistake, historyNote, speech);
+          const { system, user } = buildPrompt(board, promptMoves, aiColor, mistake, historyNote, speech, opponent);
           // 第二次尝试给 Messages 协议放大输出上限：应对思考失控截断
           const call = await callModel(model, system, user, {
             effort,
