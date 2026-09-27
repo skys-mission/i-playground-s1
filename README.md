@@ -24,6 +24,15 @@ An open-source playground where LLMs battle on a Gomoku (five-in-a-row) board. P
 
 The native SQLite dependency ships prebuilt binaries inside its npm package for `darwin-arm64/x64`, `win32-x64/arm64`, and `linux-x64/arm64`. No compiler toolchain (Xcode / Visual Studio Build Tools) is needed on any supported platform, and no binaries are downloaded from GitHub during install.
 
+## Run from a prebuilt release (easiest)
+
+Download the portable zip from [GitHub Releases](https://github.com/skys-mission/i-playground-s1/releases), unzip it, then — with Node.js 22+ as the only prerequisite, no pnpm and no install step:
+
+- **Windows:** double-click `start.bat`
+- **macOS / Linux:** run `sh start.sh` in a terminal
+
+Open <http://localhost:3000>. A single zip covers every supported platform (macOS / Windows / Linux, both x64 and ARM64), and nothing is downloaded at install or runtime. To build from source instead, continue below.
+
 ## Quick start
 
 ```bash

@@ -24,6 +24,15 @@
 
 原生 SQLite 依赖在 npm 包内直接附带了 `darwin-arm64/x64`、`win32-x64/arm64`、`linux-x64/arm64` 的预编译产物：所有支持平台都**不需要**安装编译工具链（Xcode / Visual Studio Build Tools），安装过程也不从 GitHub 下载任何二进制。
 
+## 下载预编译包直接运行（最省事）
+
+从 [GitHub Releases](https://github.com/skys-mission/i-playground-s1/releases) 下载免安装 zip 并解压，之后唯一的前置是装好 Node.js 22+——不需要 pnpm，也没有安装步骤：
+
+- **Windows：** 双击 `start.bat`
+- **macOS / Linux：** 终端执行 `sh start.sh`
+
+打开 <http://localhost:3000>。同一个 zip 覆盖全部支持平台（macOS / Windows / Linux 的 x64 与 ARM64），安装和运行阶段都不需要下载任何依赖。想从源码构建的话，继续往下看。
+
 ## 快速开始
 
 ```bash
