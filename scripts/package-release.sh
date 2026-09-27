@@ -14,8 +14,8 @@ if [ ! -f "$STAGE/server.js" ]; then
   exit 1
 fi
 
-# 幂等：清掉上次拼装残留
-rm -rf "$STAGE/public" "$STAGE/.next/static" "$STAGE/drizzle" "$STAGE/data"
+# 幂等：清掉上次拼装残留（runtime/ 是本机测试可能留下的便携 Node，不能进发布包）
+rm -rf "$STAGE/public" "$STAGE/.next/static" "$STAGE/drizzle" "$STAGE/data" "$STAGE/runtime"
 
 # standalone 不自动携带的运行时资产（静态资源 + drizzle 迁移目录）
 cp -R public "$STAGE/public"

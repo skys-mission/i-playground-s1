@@ -26,12 +26,12 @@
 
 ## 下载预编译包直接运行（最省事）
 
-从 [GitHub Releases](https://github.com/skys-mission/i-playground-s1/releases) 下载免安装 zip 并解压，之后唯一的前置是装好 Node.js 22+——不需要 pnpm，也没有安装步骤：
+从 [GitHub Releases](https://github.com/skys-mission/i-playground-s1/releases) 下载免安装 zip 并解压，直接启动——不需要 pnpm，也没有安装步骤：
 
 - **Windows：** 双击 `start.bat`
 - **macOS / Linux：** 终端执行 `sh start.sh`
 
-打开 <http://localhost:3000>。同一个 zip 覆盖全部支持平台（macOS / Windows / Linux 的 x64 与 ARM64），安装和运行阶段都不需要下载任何依赖。想从源码构建的话，继续往下看。
+系统里已装 Node.js 22+ 就直接用；没装也不用手动装——首次启动会自动下载一份便携版 Node 到包内 `runtime/` 目录（先用官方源，连不上自动切国内镜像），不改系统、不需要管理员权限。打开 <http://localhost:3000>。同一个 zip 覆盖全部支持平台（macOS / Windows / Linux 的 x64 与 ARM64）。想从源码构建的话，继续往下看。
 
 ## 快速开始
 
