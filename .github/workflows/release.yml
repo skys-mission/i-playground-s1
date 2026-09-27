@@ -50,7 +50,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="$GITHUB_REF_NAME"
-          notes="Portable build — unzip, install Node.js 22+, then run start.bat (Windows) or sh start.sh (macOS/Linux) and open http://localhost:3000. One zip covers macOS/Linux/Windows on x64 and ARM64. Details: README-RUN.md inside the zip."
+          notes="Portable build — unzip and run start.bat (Windows) or sh start.sh (macOS/Linux), then open http://localhost:3000. Node.js 22+ is used if present; otherwise a portable Node is downloaded automatically on first launch (official source with China-mirror fallback). One zip covers macOS/Linux/Windows on x64 and ARM64. Details: README-RUN.md inside the zip."
           args=(--title "$tag" --notes "$notes")
           case "$tag" in
             *preview*|*rc*|*beta*) args+=(--prerelease) ;;

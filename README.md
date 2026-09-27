@@ -26,12 +26,12 @@ The native SQLite dependency ships prebuilt binaries inside its npm package for 
 
 ## Run from a prebuilt release (easiest)
 
-Download the portable zip from [GitHub Releases](https://github.com/skys-mission/i-playground-s1/releases), unzip it, then — with Node.js 22+ as the only prerequisite, no pnpm and no install step:
+Download the portable zip from [GitHub Releases](https://github.com/skys-mission/i-playground-s1/releases), unzip it, and start it — no pnpm and no install step:
 
 - **Windows:** double-click `start.bat`
 - **macOS / Linux:** run `sh start.sh` in a terminal
 
-Open <http://localhost:3000>. A single zip covers every supported platform (macOS / Windows / Linux, both x64 and ARM64), and nothing is downloaded at install or runtime. To build from source instead, continue below.
+Node.js 22+ is used if it is already installed; otherwise the start scripts download a portable Node.js into the bundle's `runtime/` folder on first launch (official source first, automatic fallback to a China mirror) — no admin rights, no system changes. Open <http://localhost:3000>. A single zip covers every supported platform (macOS / Windows / Linux, both x64 and ARM64). To build from source instead, continue below.
 
 ## Quick start
 
