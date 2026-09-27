@@ -24,9 +24,20 @@ export async function PATCH(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: parsed.error }, { status: 400 });
   }
 
-  const updated = await getDb()
+  // 密钥不下发浏览器：编辑留空 = 保持库里的原密钥
+  const db = getDb();
+  const current = await db
+    .select({ apiKey: modelConfigs.apiKey })
+    .from(modelConfigs)
+    .where(eq(modelConfigs.id, id))
+    .limit(1);
+  if (current.length === 0) {
+    return NextResponse.json({ error: "模型不存在" }, { status: 404 });
+  }
+
+  const updated = await db
     .update(modelConfigs)
-    .set({ ...parsed.value, updatedAt: new Date() })
+    .set({ ...parsed.value, apiKey: parsed.value.apiKey || current[0].apiKey, updatedAt: new Date() })
     .where(eq(modelConfigs.id, id))
     .returning();
 

@@ -1,0 +1,1 @@
+ALTER TABLE `model_configs` ADD `avatar` text DEFAULT '' NOT NULL;

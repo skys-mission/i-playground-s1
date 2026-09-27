@@ -1,61 +1,63 @@
 import { NextRequest, NextResponse } from "next/server";
-
-interface TestPayload {
-  protocol: string;
-  modelId: string;
-  baseUrl: string;
-  apiKey: string;
-}
+import { eq } from "drizzle-orm";
+import { getDb } from "@/db";
+import { modelConfigs } from "@/db/schema";
 
 const TIMEOUT_MS = 15000;
 
-/** 服务端转发一次最小化的真实请求，验证模型配置能否调通（同时绕开浏览器 CORS） */
+/** 按模型配置 id 转发一次最小化的真实请求，验证配置能否调通。
+ *  密钥只存在服务端，请求体里不再出现 */
 export async function POST(req: NextRequest) {
-  let payload: TestPayload;
+  let id: unknown;
   try {
-    payload = await req.json();
+    id = (await req.json())?.id;
   } catch {
     return NextResponse.json({ ok: false, message: "请求体解析失败" }, { status: 400 });
   }
-
-  const { protocol, modelId, baseUrl, apiKey } = payload;
-  if (!modelId || !baseUrl) {
-    return NextResponse.json(
-      { ok: false, message: "缺少模型 ID 或 Base URL" },
-      { status: 400 },
-    );
+  if (typeof id !== "string" || !id) {
+    return NextResponse.json({ ok: false, message: "缺少模型配置 ID" }, { status: 400 });
   }
 
-  const base = baseUrl.replace(/\/+$/, "");
+  const rows = await getDb()
+    .select()
+    .from(modelConfigs)
+    .where(eq(modelConfigs.id, id))
+    .limit(1);
+  const row = rows[0];
+  if (!row) {
+    return NextResponse.json({ ok: false, message: "找不到该模型配置" }, { status: 404 });
+  }
+
+  const base = row.baseUrl.replace(/\/+$/, "");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   let url: string;
   let body: Record<string, unknown>;
 
-  switch (protocol) {
+  switch (row.protocol) {
     case "openai-chat":
       url = `${base}/chat/completions`;
-      headers.Authorization = `Bearer ${apiKey}`;
-      body = { model: modelId, messages: [{ role: "user", content: "Hi" }] };
+      headers.Authorization = `Bearer ${row.apiKey}`;
+      body = { model: row.modelId, messages: [{ role: "user", content: "Hi" }] };
       break;
     case "openai-responses":
       url = `${base}/responses`;
-      headers.Authorization = `Bearer ${apiKey}`;
-      body = { model: modelId, input: "Hi" };
+      headers.Authorization = `Bearer ${row.apiKey}`;
+      body = { model: row.modelId, input: "Hi" };
       break;
     case "anthropic-messages":
       url = `${base}/v1/messages`;
-      headers["x-api-key"] = apiKey;
+      headers["x-api-key"] = row.apiKey;
       headers["anthropic-version"] = "2023-06-01";
       // Anthropic 的 max_tokens 是必填项
       body = {
-        model: modelId,
+        model: row.modelId,
         max_tokens: 1,
         messages: [{ role: "user", content: "Hi" }],
       };
       break;
     default:
       return NextResponse.json(
-        { ok: false, message: `未知协议：${protocol}` },
+        { ok: false, message: `未知协议：${row.protocol}` },
         { status: 400 },
       );
   }

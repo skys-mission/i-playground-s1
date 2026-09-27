@@ -8,6 +8,8 @@ export const modelConfigs = sqliteTable("model_configs", {
   modelId: text("model_id").notNull(),
   baseUrl: text("base_url").notNull().default(""),
   apiKey: text("api_key").notNull().default(""),
+  /** 模型头像（data URL，客户端居中裁剪到 128px 后存储） */
+  avatar: text("avatar").notNull().default(""),
   /** 多轮对话时是否把上一轮思维链发回服务端 */
   reasoningPassback: integer("reasoning_passback", { mode: "boolean" })
     .notNull()
@@ -25,6 +27,8 @@ export const modelConfigs = sqliteTable("model_configs", {
     .$type<string[]>()
     .notNull()
     .default([]),
+  /** 输入上下文上限（tokens 估算值）；0 = 不限制，超限时自动压缩输入 */
+  contextLimit: integer("context_limit").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
